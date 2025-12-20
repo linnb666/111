@@ -2,14 +2,15 @@ import sys
 import argparse
 from pathlib import Path
 
-from config.config import OUTPUT_DIR
+from config.config import OUTPUT_DIR, POSE_CONFIG
 from modules.video_processor import VideoProcessor
-from modules.pose_estimator import PoseEstimator
+from modules.pose_estimator import create_pose_estimator
 from modules.kinematic_analyzer import KinematicAnalyzer
 from modules.temporal_model import TemporalModelAnalyzer
 from modules.quality_evaluator import QualityEvaluator
 from modules.ai_analyzer import AIAnalyzer
 from modules.database import DatabaseManager
+from modules.view_detector import ViewAngleDetector, AdaptiveAnalyzer
 from utils.visualization import create_comparison_video, plot_angle_curves
 
 
@@ -20,6 +21,8 @@ def main():
     parser.add_argument('--output', type=str, default=None, help='输出目录')
     parser.add_argument('--visualize', action='store_true', help='生成可视化结果')
     parser.add_argument('--save-db', action='store_true', help='保存到数据库')
+    parser.add_argument('--view', type=str, choices=['auto', 'side', 'front', 'back'],
+                        default='auto', help='视频视角 (auto=自动检测)')
 
     args = parser.parse_args()
 
@@ -37,11 +40,16 @@ def main():
     print("基于深度学习的跑步动作视频解析与技术质量评价系统")
     print("=" * 80)
     print(f"视频文件: {video_path.name}")
+    print(f"姿态估计后端: {POSE_CONFIG['backend'].upper()}")
+    print(f"视角模式: {args.view}")
     print("=" * 80)
 
     try:
         # 执行分析
-        results = run_analysis_pipeline(str(video_path), output_dir, args.visualize)
+        results = run_analysis_pipeline(
+            str(video_path), output_dir, args.visualize,
+            view_mode=args.view
+        )
 
         # 打印结果
         print_results(results)
@@ -63,7 +71,8 @@ def main():
         sys.exit(1)
 
 
-def run_analysis_pipeline(video_path: str, output_dir: Path, visualize: bool = False):
+def run_analysis_pipeline(video_path: str, output_dir: Path, visualize: bool = False,
+                          view_mode: str = 'auto'):
     """运行完整分析流程"""
 
     # 1. 视频预处理
@@ -78,12 +87,12 @@ def run_analysis_pipeline(video_path: str, output_dir: Path, visualize: bool = F
     print(f"   提取帧数: {len(frames)}")
 
     # 2. 姿态估计
-    print("\n2️⃣ 人体姿态估计（MediaPipe Pose）...")
-    estimator = PoseEstimator()
+    print("\n2️⃣ 人体姿态估计...")
+    estimator = create_pose_estimator(POSE_CONFIG['backend'], POSE_CONFIG)
     keypoints_sequence = estimator.process_frames(frames)
 
     detected_count = sum(1 for kp in keypoints_sequence if kp['detected'])
-    print(f"   检测成功: {detected_count}/{len(keypoints_sequence)} 帧")
+    print(f"   检测成功: {detected_count}/{len(keypoints_sequence)} 帧 ({detected_count/len(keypoints_sequence)*100:.1f}%)")
 
     # 可视化姿态
     if visualize and detected_count > 0:
@@ -97,23 +106,73 @@ def run_analysis_pipeline(video_path: str, output_dir: Path, visualize: bool = F
         import cv2
         cv2.imwrite(str(output_dir / 'pose_sample.jpg'), pose_frames[0])
 
-    # 3. 运动学特征解析
-    print("\n3️⃣ 运动学特征解析...")
-    kinematic_analyzer = KinematicAnalyzer()
-    kinematic_results = kinematic_analyzer.analyze_sequence(keypoints_sequence, fps)
+    # 3. 视角检测
+    print("\n3️⃣ 视角检测...")
+    if view_mode == 'auto':
+        view_detector = ViewAngleDetector()
+        view_result = view_detector.detect_view_angle(keypoints_sequence)
+        detected_view = view_result['view_angle']
+        view_confidence = view_result['confidence']
+        print(f"   检测视角: {get_view_name(detected_view)}")
+        print(f"   置信度: {view_confidence*100:.1f}%")
+        print(f"   分析策略: {get_strategy_description(detected_view)}")
+    else:
+        detected_view = view_mode
+        view_confidence = 1.0
+        print(f"   使用手动指定视角: {get_view_name(detected_view)}")
 
+    # 4. 运动学特征解析（使用自适应分析器）
+    print("\n4️⃣ 运动学特征解析...")
+    adaptive_analyzer = AdaptiveAnalyzer()
+    kinematic_results = adaptive_analyzer.analyze(
+        keypoints_sequence, fps,
+        view_angle=detected_view
+    )
+
+    # 基础指标输出
     print(f"   步频: {kinematic_results['cadence']['cadence']:.1f} 步/分")
     print(f"   步数: {kinematic_results['cadence']['step_count']}")
-    print(f"   垂直振幅: {kinematic_results['vertical_motion']['amplitude']:.2f}")
+
+    # 垂直振幅（归一化）
+    vertical_motion = kinematic_results.get('vertical_motion', {})
+    if 'normalized_amplitude' in vertical_motion:
+        amplitude_pct = vertical_motion['normalized_amplitude'] * 100
+        print(f"   垂直振幅: {amplitude_pct:.2f}% (躯干长度)")
+    else:
+        print(f"   垂直振幅: {vertical_motion.get('amplitude', 0):.2f} px")
+
+    # 膝关节角度分析（侧面视角）
+    if detected_view in ['side', 'mixed']:
+        angles = kinematic_results.get('angles', {})
+        knee_angles = angles.get('knee', {})
+        if 'phase_analysis' in knee_angles:
+            print("   膝关节角度（分阶段）:")
+            phase_analysis = knee_angles['phase_analysis']
+            for phase_name, phase_data in phase_analysis.items():
+                phase_cn = {'ground_contact': '触地', 'flight': '腾空', 'transition': '过渡'}.get(phase_name, phase_name)
+                if phase_data.get('count', 0) > 0:
+                    print(f"      {phase_cn}: {phase_data['mean']:.1f}° (范围: {phase_data['min']:.1f}°-{phase_data['max']:.1f}°)")
+
+    # 对称性分析（正面/背面视角）
+    if detected_view in ['front', 'back', 'mixed']:
+        symmetry = kinematic_results.get('symmetry', {})
+        if symmetry:
+            print("   对称性分析:")
+            print(f"      肩部: {symmetry.get('shoulder_symmetry', 0)*100:.1f}%")
+            print(f"      髋部: {symmetry.get('hip_symmetry', 0)*100:.1f}%")
+            print(f"      整体: {symmetry.get('overall_symmetry', 0)*100:.1f}%")
 
     # 可视化角度曲线
     if visualize and 'angles' in kinematic_results:
         print("   生成角度曲线图...")
-        plot_angle_curves(kinematic_results['angles'],
-                          str(output_dir / 'angle_curves.png'))
+        try:
+            plot_angle_curves(kinematic_results['angles'],
+                              str(output_dir / 'angle_curves.png'))
+        except Exception as e:
+            print(f"   警告: 无法生成角度曲线图 - {e}")
 
-    # 4. 时序深度学习分析
-    print("\n4️⃣ 时序深度学习分析（LSTM/CNN）...")
+    # 5. 时序深度学习分析
+    print("\n5️⃣ 时序深度学习分析（LSTM/CNN）...")
     temporal_analyzer = TemporalModelAnalyzer()
     temporal_results = temporal_analyzer.analyze(keypoints_sequence)
 
@@ -125,21 +184,25 @@ def run_analysis_pipeline(video_path: str, output_dir: Path, visualize: bool = F
           f"腾空{phase_dist['flight'] * 100:.1f}% | "
           f"过渡{phase_dist['transition'] * 100:.1f}%")
 
-    # 5. 跑步技术质量评价
-    print("\n5️⃣ 跑步技术质量评价...")
+    # 6. 跑步技术质量评价
+    print("\n6️⃣ 跑步技术质量评价...")
     quality_evaluator = QualityEvaluator()
-    quality_results = quality_evaluator.evaluate(kinematic_results, temporal_results)
+    quality_results = quality_evaluator.evaluate(
+        kinematic_results, temporal_results,
+        view_angle=detected_view
+    )
 
     print(f"   总体评分: {quality_results['total_score']:.2f}/100")
     print(f"   评级: {quality_results['rating']}")
 
-    # 6. AI文本分析
-    print("\n6️⃣ AI文本分析与润色...")
+    # 7. AI文本分析
+    print("\n7️⃣ AI文本分析与报告生成...")
     ai_analyzer = AIAnalyzer()
     results_for_ai = {
         'quality_evaluation': quality_results,
         'kinematic_analysis': kinematic_results,
-        'temporal_analysis': temporal_results
+        'temporal_analysis': temporal_results,
+        'view_angle': detected_view
     }
     ai_text = ai_analyzer.generate_analysis_report(results_for_ai)
 
@@ -151,6 +214,8 @@ def run_analysis_pipeline(video_path: str, output_dir: Path, visualize: bool = F
     # 整合结果
     complete_results = {
         'video_info': video_info,
+        'view_angle': detected_view,
+        'view_confidence': view_confidence,
         'kinematic_analysis': kinematic_results,
         'temporal_analysis': temporal_results,
         'quality_evaluation': quality_results,
@@ -164,36 +229,66 @@ def run_analysis_pipeline(video_path: str, output_dir: Path, visualize: bool = F
     return complete_results
 
 
+def get_view_name(view: str) -> str:
+    """获取视角中文名称"""
+    names = {
+        'side': '侧面视角',
+        'front': '正面视角',
+        'back': '背面视角',
+        'mixed': '混合视角'
+    }
+    return names.get(view, view)
+
+
+def get_strategy_description(view: str) -> str:
+    """获取分析策略描述"""
+    strategies = {
+        'side': '膝关节角度 + 垂直振幅 + 躯干前倾',
+        'front': '身体对称性 + 髋部稳定性 + 膝外翻检测',
+        'back': '身体对称性 + 髋部稳定性 + 足跟外翻检测',
+        'mixed': '综合分析（侧面+正面指标）'
+    }
+    return strategies.get(view, '标准分析')
+
+
 def print_results(results: dict):
     """打印分析结果"""
     quality = results['quality_evaluation']
+    view_angle = results.get('view_angle', 'unknown')
 
     print("\n" + "=" * 80)
     print("📊 分析结果汇总")
     print("=" * 80)
+
+    print(f"\n📐 视角信息")
+    print(f"   检测视角: {get_view_name(view_angle)}")
+    print(f"   置信度: {results.get('view_confidence', 0)*100:.1f}%")
 
     print(f"\n🎯 总体评价")
     print(f"   技术质量评分: {quality['total_score']:.2f}/100")
     print(f"   评级: {quality['rating']}")
 
     print(f"\n📈 各维度得分")
-    dims = quality['dimension_scores']
-    print(f"   稳定性: {dims['stability']:.2f}")
-    print(f"   效率: {dims['efficiency']:.2f}")
-    print(f"   跑姿: {dims['form']:.2f}")
-    print(f"   节奏: {dims['rhythm']:.2f}")
+    dims = quality.get('dimension_scores', {})
+    print(f"   稳定性: {dims.get('stability', 0):.2f}")
+    print(f"   效率: {dims.get('efficiency', 0):.2f}")
+    print(f"   跑姿: {dims.get('form', 0):.2f}")
+    print(f"   节奏: {dims.get('rhythm', 0):.2f}")
 
-    print(f"\n✅ 优势")
-    for strength in quality['strengths']:
-        print(f"   • {strength}")
+    if quality.get('strengths'):
+        print(f"\n✅ 优势")
+        for strength in quality['strengths']:
+            print(f"   • {strength}")
 
-    print(f"\n⚠️  薄弱项")
-    for weakness in quality['weaknesses']:
-        print(f"   • {weakness}")
+    if quality.get('weaknesses'):
+        print(f"\n⚠️  薄弱项")
+        for weakness in quality['weaknesses']:
+            print(f"   • {weakness}")
 
-    print(f"\n💡 改进建议")
-    for suggestion in quality['suggestions']:
-        print(f"   • {suggestion}")
+    if quality.get('suggestions'):
+        print(f"\n💡 改进建议")
+        for suggestion in quality['suggestions']:
+            print(f"   • {suggestion}")
 
 
 if __name__ == '__main__':
