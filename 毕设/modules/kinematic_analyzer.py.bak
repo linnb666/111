@@ -1,0 +1,274 @@
+import numpy as np
+from scipy.signal import find_peaks, savgol_filter
+from typing import List, Dict, Tuple
+from config.config import KINEMATIC_CONFIG
+
+
+class KinematicAnalyzer:
+    """运动学分析器"""
+
+    def __init__(self):
+        """初始化分析器"""
+        self.smooth_window = KINEMATIC_CONFIG['smooth_window']
+
+    def analyze_sequence(self, keypoints_sequence: List[Dict], fps: float) -> Dict:
+        """
+        分析完整关键点序列
+        Args:
+            keypoints_sequence: 关键点时间序列
+            fps: 帧率
+        Returns:
+            分析结果字典
+        """
+        # 提取有效帧
+        valid_frames = [kp for kp in keypoints_sequence if kp['detected']]
+
+        if len(valid_frames) < 10:
+            return self._get_empty_analysis()
+
+        # 计算各项运动学指标
+        results = {
+            'fps': fps,
+            'total_frames': len(keypoints_sequence),
+            'valid_frames': len(valid_frames),
+            'angles': self._calculate_angles(valid_frames),
+            'vertical_motion': self._calculate_vertical_motion(valid_frames),
+            'cadence': self._calculate_cadence(valid_frames, fps),
+            'stride_info': self._calculate_stride_info(valid_frames, fps),
+            'stability': self._calculate_stability(valid_frames)
+        }
+
+        return results
+
+    def _calculate_angles(self, keypoints_sequence: List[Dict]) -> Dict:
+        """计算关节角度时间序列"""
+        knee_angles_left = []
+        knee_angles_right = []
+        hip_angles_left = []
+        hip_angles_right = []
+
+        for kp in keypoints_sequence:
+            landmarks = kp['landmarks']
+
+            # 左膝角度
+            left_knee_angle = self._calculate_joint_angle(
+                landmarks[23],  # left_hip
+                landmarks[25],  # left_knee
+                landmarks[27]  # left_ankle
+            )
+            knee_angles_left.append(left_knee_angle)
+
+            # 右膝角度
+            right_knee_angle = self._calculate_joint_angle(
+                landmarks[24],  # right_hip
+                landmarks[26],  # right_knee
+                landmarks[28]  # right_ankle
+            )
+            knee_angles_right.append(right_knee_angle)
+
+            # 左髋角度
+            left_hip_angle = self._calculate_joint_angle(
+                landmarks[11],  # left_shoulder
+                landmarks[23],  # left_hip
+                landmarks[25]  # left_knee
+            )
+            hip_angles_left.append(left_hip_angle)
+
+            # 右髋角度
+            right_hip_angle = self._calculate_joint_angle(
+                landmarks[12],  # right_shoulder
+                landmarks[24],  # right_hip
+                landmarks[26]  # right_knee
+            )
+            hip_angles_right.append(right_hip_angle)
+
+        # 平滑处理
+        if len(knee_angles_left) > self.smooth_window:
+            knee_angles_left = self._smooth_signal(knee_angles_left)
+            knee_angles_right = self._smooth_signal(knee_angles_right)
+            hip_angles_left = self._smooth_signal(hip_angles_left)
+            hip_angles_right = self._smooth_signal(hip_angles_right)
+
+        return {
+            'knee_left': knee_angles_left,
+            'knee_right': knee_angles_right,
+            'hip_left': hip_angles_left,
+            'hip_right': hip_angles_right,
+            'knee_left_mean': np.mean(knee_angles_left),
+            'knee_right_mean': np.mean(knee_angles_right),
+            'knee_left_std': np.std(knee_angles_left),
+            'knee_right_std': np.std(knee_angles_right)
+        }
+
+    def _calculate_joint_angle(self, p1: Dict, p2: Dict, p3: Dict) -> float:
+        """
+        计算三点构成的关节角度
+        p2为关节点
+        """
+        if p1['visibility'] < 0.5 or p2['visibility'] < 0.5 or p3['visibility'] < 0.5:
+            return 0.0
+
+        # 构建向量
+        v1 = np.array([p1['x'] - p2['x'], p1['y'] - p2['y']])
+        v2 = np.array([p3['x'] - p2['x'], p3['y'] - p2['y']])
+
+        # 计算角度
+        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6)
+        angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
+        return np.degrees(angle)
+
+    def _calculate_vertical_motion(self, keypoints_sequence: List[Dict]) -> Dict:
+        """计算垂直运动指标（质心近似）"""
+        # 使用髋部中点作为质心近似
+        vertical_positions = []
+
+        for kp in keypoints_sequence:
+            left_hip = kp['landmarks'][23]
+            right_hip = kp['landmarks'][24]
+
+            if left_hip['visibility'] > 0.5 and right_hip['visibility'] > 0.5:
+                center_y = (left_hip['y'] + right_hip['y']) / 2
+                vertical_positions.append(center_y)
+
+        if len(vertical_positions) < 2:
+            return {'amplitude': 0.0, 'positions': []}
+
+        # 平滑处理
+        if len(vertical_positions) > self.smooth_window:
+            vertical_positions = self._smooth_signal(vertical_positions)
+
+        # 计算振幅
+        amplitude = np.max(vertical_positions) - np.min(vertical_positions)
+
+        return {
+            'amplitude': float(amplitude),
+            'positions': vertical_positions,
+            'mean_position': float(np.mean(vertical_positions)),
+            'std_position': float(np.std(vertical_positions))
+        }
+
+    def _calculate_cadence(self, keypoints_sequence: List[Dict], fps: float) -> Dict:
+        """计算步频（cadence）"""
+        # 使用膝关节角度检测步态周期
+        knee_angles = []
+
+        for kp in keypoints_sequence:
+            left_knee = self._calculate_joint_angle(
+                kp['landmarks'][23],
+                kp['landmarks'][25],
+                kp['landmarks'][27]
+            )
+            knee_angles.append(left_knee)
+
+        if len(knee_angles) < 10:
+            return {'cadence': 0.0, 'step_count': 0}
+
+        # 平滑
+        knee_angles = self._smooth_signal(knee_angles)
+
+        # 检测峰值（步态周期）
+        peaks, _ = find_peaks(knee_angles, distance=int(fps * 0.3), prominence=10)
+
+        step_count = len(peaks)
+        duration = len(keypoints_sequence) / fps
+
+        # 步频 = 步数 / 时间（转换为步/分钟）
+        cadence = (step_count / duration) * 60 if duration > 0 else 0
+
+        return {
+            'cadence': float(cadence),
+            'step_count': step_count,
+            'duration': float(duration),
+            'peak_indices': peaks.tolist()
+        }
+
+    def _calculate_stride_info(self, keypoints_sequence: List[Dict], fps: float) -> Dict:
+        """计算步态信息"""
+        # 使用脚踝Y坐标检测触地
+        left_ankle_y = []
+        right_ankle_y = []
+
+        for kp in keypoints_sequence:
+            left_ankle = kp['landmarks'][27]
+            right_ankle = kp['landmarks'][28]
+
+            if left_ankle['visibility'] > 0.5:
+                left_ankle_y.append(left_ankle['y'])
+            if right_ankle['visibility'] > 0.5:
+                right_ankle_y.append(right_ankle['y'])
+
+        stride_length_estimate = 0.0
+        ground_contact_time = 0.0
+
+        # 简化估算
+        if left_ankle_y and right_ankle_y:
+            # 步幅估算（基于脚踝Y坐标变化）
+            stride_length_estimate = np.std(left_ankle_y) + np.std(right_ankle_y)
+
+        return {
+            'stride_length_estimate': float(stride_length_estimate),
+            'ground_contact_time': float(ground_contact_time)
+        }
+
+    def _calculate_stability(self, keypoints_sequence: List[Dict]) -> Dict:
+        """计算动作稳定性"""
+        # 计算肩部和髋部的水平稳定性
+        shoulder_positions = []
+        hip_positions = []
+
+        for kp in keypoints_sequence:
+            left_shoulder = kp['landmarks'][11]
+            right_shoulder = kp['landmarks'][12]
+            left_hip = kp['landmarks'][23]
+            right_hip = kp['landmarks'][24]
+
+            if all(p['visibility'] > 0.5 for p in [left_shoulder, right_shoulder]):
+                shoulder_center_x = (left_shoulder['x'] + right_shoulder['x']) / 2
+                shoulder_positions.append(shoulder_center_x)
+
+            if all(p['visibility'] > 0.5 for p in [left_hip, right_hip]):
+                hip_center_x = (left_hip['x'] + right_hip['x']) / 2
+                hip_positions.append(hip_center_x)
+
+        shoulder_stability = 0.0
+        hip_stability = 0.0
+
+        if len(shoulder_positions) > 1:
+            shoulder_stability = 100 - min(np.std(shoulder_positions), 100)
+
+        if len(hip_positions) > 1:
+            hip_stability = 100 - min(np.std(hip_positions), 100)
+
+        overall_stability = (shoulder_stability + hip_stability) / 2
+
+        return {
+            'overall': float(overall_stability),
+            'shoulder': float(shoulder_stability),
+            'hip': float(hip_stability)
+        }
+
+    def _smooth_signal(self, signal: List[float]) -> List[float]:
+        """信号平滑处理"""
+        if len(signal) < self.smooth_window:
+            return signal
+
+        try:
+            smoothed = savgol_filter(signal,
+                                     window_length=min(self.smooth_window, len(signal)),
+                                     polyorder=2)
+            return smoothed.tolist()
+        except:
+            return signal
+
+    def _get_empty_analysis(self) -> Dict:
+        """返回空分析结果"""
+        return {
+            'fps': 0,
+            'total_frames': 0,
+            'valid_frames': 0,
+            'angles': {},
+            'vertical_motion': {},
+            'cadence': {},
+            'stride_info': {},
+            'stability': {}
+        }
