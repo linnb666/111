@@ -328,7 +328,7 @@ class ZhipuProvider(BaseAIProvider):
         data = {
             'model': self.model,
             'messages': messages,
-            'max_tokens': 1000
+            'max_tokens': 2000
         }
 
         try:
@@ -342,7 +342,7 @@ class ZhipuProvider(BaseAIProvider):
             if response.status_code == 200:
                 return response.json()['choices'][0]['message']['content']
             else:
-                return f"API请求失败: {response.status_code}"
+                return f"API请求失败: {response.status_code} - {response.text}"
         except Exception as e:
             return f"请求错误: {str(e)}"
 
@@ -365,7 +365,7 @@ class ZhipuProvider(BaseAIProvider):
                     {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_data}'}}
                 ]
             }],
-            'max_tokens': 1000
+            'max_tokens': 1500
         }
 
         try:
@@ -373,15 +373,132 @@ class ZhipuProvider(BaseAIProvider):
                 f'{self.base_url}/chat/completions',
                 headers=headers,
                 json=data,
-                timeout=60
+                timeout=90
             )
 
             if response.status_code == 200:
                 return response.json()['choices'][0]['message']['content']
             else:
-                return f"API请求失败: {response.status_code}"
+                return f"API请求失败: {response.status_code} - {response.text}"
         except Exception as e:
             return f"请求错误: {str(e)}"
+
+    def analyze_video_frames(self, frame_paths: List[str], prompt: str) -> str:
+        """分析多个视频帧，支持时间段问题识别"""
+        if not frame_paths:
+            return "无法分析：未提供帧"
+
+        # 逐帧分析并汇总
+        frame_analyses = []
+        for i, frame_path in enumerate(frame_paths):
+            frame_prompt = f"""请分析这张跑步姿态图片（第{i+1}帧）：
+1. 描述跑者当前的姿态
+2. 识别可能存在的技术问题
+3. 评估动作质量（好/一般/需改进）
+
+请用简洁的语言回答。"""
+
+            result = self.analyze_image(frame_path, frame_prompt)
+            if not result.startswith("API请求失败") and not result.startswith("请求错误"):
+                frame_analyses.append(f"**帧 {i+1}**: {result}")
+
+        if not frame_analyses:
+            return "多模态分析失败：无法获取有效的帧分析结果"
+
+        # 汇总分析
+        summary_prompt = f"""基于以下各帧的分析结果，请生成一份综合的跑步技术问题时间段分析报告：
+
+{chr(10).join(frame_analyses)}
+
+请按照以下格式输出：
+1. 整体技术评估
+2. 各时间段发现的问题
+3. 需要重点关注的技术细节
+4. 改进建议"""
+
+        return self.generate_text(summary_prompt)
+
+    def analyze_time_segments(self, keyframe_data: List[Dict], kinematic_results: Dict) -> str:
+        """
+        时间段问题分析 - 结合关键帧图像和运动学数据
+
+        Args:
+            keyframe_data: 关键帧信息列表，包含 path, time_sec, detected
+            kinematic_results: 运动学分析结果
+
+        Returns:
+            时间段问题分析报告
+        """
+        if not keyframe_data:
+            return "无法进行时间段分析：未提供关键帧数据"
+
+        # 构建运动学数据摘要
+        cadence = kinematic_results.get('cadence', {}).get('cadence', 0)
+        vertical_amp = kinematic_results.get('vertical_motion', {}).get('amplitude_normalized', 0)
+        stability = kinematic_results.get('stability', {}).get('overall', 0)
+
+        context = f"""
+运动学数据参考：
+- 步频: {cadence:.1f} 步/分
+- 垂直振幅: {vertical_amp:.2f}% 躯干长度
+- 稳定性评分: {stability:.1f}/100
+"""
+
+        # 分析每个关键帧
+        segment_analyses = []
+        for i, kf in enumerate(keyframe_data):
+            if not kf.get('detected', False):
+                segment_analyses.append(f"时间 {kf['time_sec']:.2f}s: 未检测到姿态")
+                continue
+
+            frame_prompt = f"""你是一位专业的跑步教练。请分析这张跑步姿态图片。
+
+当前时间点: {kf['time_sec']:.2f}秒
+
+{context}
+
+请重点分析：
+1. 此时刻的身体姿态是否正确
+2. 膝关节、髋关节角度是否合理
+3. 躯干前倾程度
+4. 是否存在明显的技术问题
+
+请用2-3句话简要描述你观察到的问题或亮点。"""
+
+            try:
+                result = self.analyze_image(kf['path'], frame_prompt)
+                if not result.startswith("API请求失败") and not result.startswith("请求错误"):
+                    segment_analyses.append(f"**{kf['time_sec']:.2f}秒**: {result}")
+            except Exception as e:
+                segment_analyses.append(f"时间 {kf['time_sec']:.2f}s: 分析失败 - {str(e)}")
+
+        if not segment_analyses:
+            return "时间段分析失败：无法获取有效的分析结果"
+
+        # 生成综合报告
+        final_prompt = f"""请基于以下各时间点的跑步姿态分析，生成一份专业的时间段问题分析报告：
+
+{chr(10).join(segment_analyses)}
+
+{context}
+
+请按照以下格式输出报告：
+
+## 时间段问题分析
+
+### 问题时间段识别
+（列出存在明显问题的时间段，说明问题类型）
+
+### 技术问题汇总
+（总结视频中反复出现的技术问题）
+
+### 改进优先级
+（按重要程度排序建议改进的方面）
+
+### 训练建议
+（提供具体可操作的训练方法）"""
+
+        return self.generate_text(final_prompt)
 
 
 class LocalRuleEngine(BaseAIProvider):
@@ -396,91 +513,183 @@ class LocalRuleEngine(BaseAIProvider):
         return "本地模式不支持图像分析，请配置AI API"
 
     def generate_analysis_report(self, results: Dict) -> str:
-        """基于规则生成分析报告"""
+        """基于规则生成分析报告 - 优化排版"""
         quality = results.get('quality_evaluation', {})
         kinematic = results.get('kinematic_analysis', {})
+        view_angle = results.get('view_angle', 'side')
 
         # 提取详细分析
         detailed = quality.get('detailed_analysis', {})
+        score = quality.get('total_score', 0)
 
-        # 构建报告
-        report = f"""
-【跑步技术分析报告】
+        # 构建报告 - 使用Markdown格式
+        report = f"""## 跑步技术分析报告
 
-一、总体评价
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-您的跑步技术总体得分为 {quality.get('total_score', 0):.1f} 分
-评级：{quality.get('rating', '待评估')}
+### 一、总体评价
 
-二、各维度表现
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+| 指标 | 结果 |
+|------|------|
+| **总体评分** | **{score:.1f}/100** |
+| **技术评级** | {quality.get('rating', '待评估')} |
+| **分析视角** | {self._get_view_name(view_angle)} |
+
 """
+        # 评分解读
+        if score >= 85:
+            report += "> 您的跑步技术处于**优秀**水平，动作协调高效！\n\n"
+        elif score >= 70:
+            report += "> 您的跑步技术**良好**，有一定基础，存在提升空间。\n\n"
+        elif score >= 55:
+            report += "> 您的跑步技术处于**一般**水平，建议针对性改进。\n\n"
+        else:
+            report += "> 您的跑步技术有较大**提升空间**，建议系统训练。\n\n"
+
+        # 各维度表现
+        report += "### 二、各维度表现\n\n"
         dims = quality.get('dimension_scores', {})
         dim_names = {
-            'stability': '动作稳定性',
-            'efficiency': '跑步效率',
-            'form': '跑姿标准度',
-            'rhythm': '节奏一致性'
+            'stability': ('动作稳定性', '身体控制和核心力量'),
+            'efficiency': ('跑步效率', '能量利用和步态经济性'),
+            'form': ('跑姿标准度', '关节角度和身体姿态'),
+            'rhythm': ('节奏一致性', '步频稳定性和节奏控制')
         }
 
-        for key, name in dim_names.items():
-            score = dims.get(key, 0)
-            level = '优秀' if score >= 85 else '良好' if score >= 70 else '一般' if score >= 55 else '待改进'
-            bar = '█' * int(score / 10) + '░' * (10 - int(score / 10))
-            report += f"  {name}: {score:.1f}  [{bar}]  {level}\n"
+        report += "| 维度 | 得分 | 等级 | 说明 |\n"
+        report += "|------|------|------|------|\n"
 
-        # 关键指标
-        report += """
-三、关键技术指标
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-        if 'cadence' in detailed:
-            report += f"  步频: {detailed['cadence'].get('value', 'N/A')}\n"
-            report += f"       {detailed['cadence'].get('assessment', '')}\n\n"
+        for key, (name, desc) in dim_names.items():
+            dim_score = dims.get(key, 0)
+            level = '优秀' if dim_score >= 85 else '良好' if dim_score >= 70 else '一般' if dim_score >= 55 else '待改进'
+            report += f"| {name} | {dim_score:.1f} | {level} | {desc} |\n"
 
-        if 'vertical_amplitude' in detailed:
-            report += f"  垂直振幅: {detailed['vertical_amplitude'].get('value', 'N/A')}\n"
-            report += f"           {detailed['vertical_amplitude'].get('assessment', '')}\n\n"
+        report += "\n"
 
-        if 'knee_angles' in detailed:
-            ka = detailed['knee_angles']
-            report += f"  膝关节角度:\n"
-            report += f"    触地期: {ka.get('ground_contact', 'N/A')}\n"
-            report += f"    最大弯曲: {ka.get('max_flexion', 'N/A')}\n"
-            report += f"    评估: {ka.get('assessment', '')}\n\n"
+        # 关键运动学指标
+        report += "### 三、关键技术指标\n\n"
 
-        # 优势与不足
-        report += """
-四、优势分析
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-        for strength in quality.get('strengths', ['暂无突出优势']):
-            report += f"  ✓ {strength}\n"
+        # 步频分析
+        cadence_data = kinematic.get('cadence', {})
+        if cadence_data:
+            cadence = cadence_data.get('cadence', 0)
+            step_count = cadence_data.get('step_count', 0)
+            duration = cadence_data.get('duration', 0)
+            rating = cadence_data.get('rating', {})
 
-        report += """
-五、改进建议
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-        for i, suggestion in enumerate(quality.get('suggestions', ['继续保持']), 1):
-            report += f"  {i}. {suggestion}\n"
+            report += f"**步频分析**\n"
+            report += f"- 步频: **{cadence:.1f} 步/分**\n"
+            report += f"- 检测步数: {step_count} 步 (视频时长 {duration:.1f} 秒)\n"
+            if rating:
+                report += f"- 评估: {rating.get('description', '')}\n"
+
+            # 步频建议
+            if cadence >= 180:
+                report += f"- 分析: 步频处于理想范围，有助于减少触地时间和受伤风险\n"
+            elif cadence >= 160:
+                report += f"- 分析: 步频适中，可尝试逐步提高至180步/分\n"
+            else:
+                report += f"- 分析: 步频偏低，建议进行节拍器训练提高步频\n"
+            report += "\n"
+
+        # 垂直振幅
+        vertical = kinematic.get('vertical_motion', {})
+        if vertical:
+            amplitude = vertical.get('amplitude_normalized', 0)
+            rating = vertical.get('amplitude_rating', {})
+
+            report += f"**垂直振幅**\n"
+            report += f"- 振幅: **{amplitude:.2f}%** (相对躯干长度)\n"
+            if rating:
+                report += f"- 等级: {rating.get('level', '未知')}\n"
+                report += f"- 评估: {rating.get('description', '')}\n"
+
+            # 振幅解读
+            if 3 <= amplitude <= 6:
+                report += f"- 分析: 垂直振幅非常理想，能量利用效率高\n"
+            elif amplitude < 3:
+                report += f"- 分析: 振幅偏小，步态可能过于保守\n"
+            elif amplitude <= 10:
+                report += f"- 分析: 振幅在可接受范围，可尝试降低\n"
+            else:
+                report += f"- 分析: 振幅偏大，建议改善跑姿减少能量浪费\n"
+            report += "\n"
+
+        # 膝关节角度（侧面视角）
+        angles = kinematic.get('angles', {})
+        if 'phase_analysis' in angles and view_angle in ['side', 'mixed']:
+            phase_analysis = angles['phase_analysis']
+
+            report += f"**膝关节角度（分阶段）**\n\n"
+            report += "| 阶段 | 平均角度 | 范围 | 参考值 |\n"
+            report += "|------|----------|------|--------|\n"
+
+            gc = phase_analysis.get('ground_contact', {})
+            if gc.get('count', 0) > 0:
+                report += f"| 触地期 | {gc.get('mean', 0):.1f}° | {gc.get('min', 0):.1f}°-{gc.get('max', 0):.1f}° | 155-170° |\n"
+
+            fl = phase_analysis.get('flight', {})
+            if fl.get('count', 0) > 0:
+                report += f"| 腾空期 | {fl.get('mean', 0):.1f}° | {fl.get('min', 0):.1f}°-{fl.get('max', 0):.1f}° | 90-130° |\n"
+
+            tr = phase_analysis.get('transition', {})
+            if tr.get('count', 0) > 0:
+                report += f"| 过渡期 | {tr.get('mean', 0):.1f}° | {tr.get('min', 0):.1f}°-{tr.get('max', 0):.1f}° | - |\n"
+
+            report += "\n"
+
+        # 稳定性分析
+        stability = kinematic.get('stability', {})
+        if stability:
+            report += f"**稳定性分析**\n"
+            report += f"- 综合稳定性: {stability.get('overall', 0):.1f}/100\n"
+            report += f"- 躯干稳定: {stability.get('trunk', 0):.1f}/100\n"
+            report += f"- 头部稳定: {stability.get('head', 0):.1f}/100\n"
+            report += f"- 左右对称: {stability.get('symmetry', 0):.1f}/100\n\n"
+
+        # 优势分析
+        strengths = quality.get('strengths', [])
+        if strengths:
+            report += "### 四、技术优势\n\n"
+            for strength in strengths:
+                report += f"✅ {strength}\n\n"
+
+        # 薄弱项
+        weaknesses = quality.get('weaknesses', [])
+        if weaknesses:
+            report += "### 五、待改进项\n\n"
+            for weakness in weaknesses:
+                report += f"⚠️ {weakness}\n\n"
+
+        # 改进建议
+        suggestions = quality.get('suggestions', [])
+        if suggestions:
+            report += "### 六、改进建议\n\n"
+            for i, suggestion in enumerate(suggestions, 1):
+                report += f"{i}. {suggestion}\n\n"
 
         # 总结
-        score = quality.get('total_score', 0)
+        report += "### 七、总结\n\n"
         if score >= 85:
-            closing = "您的跑步技术非常出色！继续保持，挑战更高目标！"
+            report += "您的跑步技术非常出色！动作协调、节奏稳定、能量利用高效。继续保持当前状态，可以尝试挑战更高配速或更长距离。\n"
         elif score >= 70:
-            closing = "整体表现良好，针对建议进行练习，您会有明显进步！"
+            report += "整体表现良好，具备较好的跑步基础。针对上述建议进行专项练习，您的跑步技术会有明显提升。建议每周进行1-2次技术训练。\n"
         elif score >= 55:
-            closing = "基础已具备，通过系统训练，您的跑步技术会有质的飞跃！"
+            report += "基础动作已经掌握，但存在一些可以优化的环节。建议从步频控制和核心稳定性入手，循序渐进地改善跑姿。\n"
         else:
-            closing = "每个人都有提升空间，坚持科学训练，进步指日可待！"
+            report += "每个跑者都有提升空间，不要气馁！建议从基础开始，重点关注身体姿态和步频节奏。坚持科学训练，进步指日可待。\n"
 
-        report += f"""
-六、总结
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{closing}
-"""
+        report += "\n---\n*本报告由跑步动作分析系统自动生成*\n"
+
         return report
+
+    def _get_view_name(self, view: str) -> str:
+        """获取视角中文名称"""
+        names = {
+            'side': '侧面视角',
+            'front': '正面视角',
+            'back': '背面视角',
+            'mixed': '混合视角'
+        }
+        return names.get(view, view)
 
 
 class AIAnalyzer:
@@ -605,6 +814,87 @@ class AIAnalyzer:
             return self.provider.analyze_video_frames(frame_paths, prompt)
         except Exception as e:
             return f"视频分析失败: {str(e)}"
+
+    def analyze_time_segments(self, keyframe_data: List[Dict], kinematic_results: Dict) -> str:
+        """
+        多模态时间段问题分析
+
+        Args:
+            keyframe_data: 关键帧信息列表
+            kinematic_results: 运动学分析结果
+
+        Returns:
+            时间段问题分析报告
+        """
+        if self.provider_name == 'local':
+            return self._local_time_segment_analysis(keyframe_data, kinematic_results)
+
+        # 检查是否支持时间段分析
+        if hasattr(self.provider, 'analyze_time_segments'):
+            try:
+                return self.provider.analyze_time_segments(keyframe_data, kinematic_results)
+            except Exception as e:
+                print(f"多模态时间段分析失败: {e}")
+                return self._local_time_segment_analysis(keyframe_data, kinematic_results)
+        else:
+            return self._local_time_segment_analysis(keyframe_data, kinematic_results)
+
+    def _local_time_segment_analysis(self, keyframe_data: List[Dict], kinematic_results: Dict) -> str:
+        """本地时间段分析（基于规则）"""
+        if not keyframe_data:
+            return "无法进行时间段分析：未提供关键帧数据"
+
+        # 提取运动学数据
+        cadence = kinematic_results.get('cadence', {}).get('cadence', 0)
+        vertical_amp = kinematic_results.get('vertical_motion', {}).get('amplitude_normalized', 0)
+        stability = kinematic_results.get('stability', {}).get('overall', 0)
+
+        # 识别问题时间段
+        problem_segments = []
+        angles = kinematic_results.get('angles', {})
+        phase_analysis = angles.get('phase_analysis', {})
+
+        # 基于规则识别问题
+        if cadence < 160:
+            problem_segments.append("全程: 步频偏低，建议提高节奏")
+        elif cadence > 210:
+            problem_segments.append("全程: 步频过高，注意控制")
+
+        if vertical_amp > 10:
+            problem_segments.append("全程: 垂直振幅偏大，能量损耗较多")
+
+        if stability < 60:
+            problem_segments.append("全程: 动作稳定性不足，需加强核心训练")
+
+        # 检查膝关节角度
+        gc = phase_analysis.get('ground_contact', {})
+        if gc.get('mean', 180) < 145:
+            problem_segments.append("触地阶段: 膝关节弯曲过大，可能影响推进效率")
+
+        fl = phase_analysis.get('flight', {})
+        if fl.get('mean', 90) > 140:
+            problem_segments.append("腾空阶段: 腿部后摆不足，影响步幅")
+
+        # 构建报告
+        report = "## 时间段问题分析（基于规则引擎）\n\n"
+
+        if problem_segments:
+            report += "### 识别到的问题\n\n"
+            for i, problem in enumerate(problem_segments, 1):
+                report += f"{i}. {problem}\n"
+            report += "\n"
+        else:
+            report += "### 分析结果\n\n未发现明显技术问题，整体表现良好。\n\n"
+
+        # 添加关键帧时间点
+        report += "### 关键帧时间点\n\n"
+        for kf in keyframe_data:
+            status = "✓ 姿态正常" if kf.get('detected', False) else "⚠ 未检测到姿态"
+            report += f"- {kf['time_sec']:.2f}s: {status}\n"
+
+        report += "\n*注：如需更精确的多模态分析，请启用智谱AI API*\n"
+
+        return report
 
     def _build_analysis_prompt(self, results: Dict) -> str:
         """构建分析提示词"""

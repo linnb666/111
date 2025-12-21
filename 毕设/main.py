@@ -130,16 +130,25 @@ def run_analysis_pipeline(video_path: str, output_dir: Path, visualize: bool = F
     )
 
     # 基础指标输出
-    print(f"   步频: {kinematic_results['cadence']['cadence']:.1f} 步/分")
-    print(f"   步数: {kinematic_results['cadence']['step_count']}")
+    cadence_data = kinematic_results['cadence']
+    print(f"   步频: {cadence_data['cadence']:.1f} 步/分")
+    print(f"   检测步数: {cadence_data['step_count']} 步 (视频时长 {cadence_data['duration']:.1f} 秒)")
+    if cadence_data.get('confidence', 0) > 0:
+        print(f"   步频置信度: {cadence_data['confidence']*100:.1f}%")
 
     # 垂直振幅（归一化）
     vertical_motion = kinematic_results.get('vertical_motion', {})
-    if 'normalized_amplitude' in vertical_motion:
-        amplitude_pct = vertical_motion['normalized_amplitude'] * 100
+    # 优先使用归一化振幅（amplitude_normalized 是相对躯干长度的百分比）
+    if 'amplitude_normalized' in vertical_motion:
+        amplitude_pct = vertical_motion['amplitude_normalized']
         print(f"   垂直振幅: {amplitude_pct:.2f}% (躯干长度)")
+        rating = vertical_motion.get('amplitude_rating', {})
+        if rating:
+            print(f"   振幅评级: {rating.get('description', '')}")
+    elif vertical_motion.get('amplitude', 0) > 0:
+        print(f"   垂直振幅: {vertical_motion['amplitude']:.4f} (归一化坐标)")
     else:
-        print(f"   垂直振幅: {vertical_motion.get('amplitude', 0):.2f} px")
+        print(f"   垂直振幅: 数据不足")
 
     # 膝关节角度分析（侧面视角）
     if detected_view in ['side', 'mixed']:
