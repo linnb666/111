@@ -121,8 +121,7 @@ class RelativePositionBias(nn.Module):
         relative_position_bias = self.relative_position_bias_table[relative_position_index.reshape(-1)].reshape(
             seq_len, seq_len, -1
         )
-        return relative_position_bias.permute(2, 0, 1).contiguous().unsqueeze(0)  # (1, num_heads, seq_len, seq_len)
-
+        return relative_position_bias.permute(2, 0, 1).contiguous().unsqueeze(0)
 
 class TransformerEncoderLayer(nn.Module):
     """
@@ -537,3 +536,4 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("✅ 所有测试通过!")
     print("=" * 70)
+
