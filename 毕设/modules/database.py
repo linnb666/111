@@ -215,8 +215,8 @@ class DatabaseManager:
         avg_score = cursor.fetchone()[0] or 0
 
         cursor.execute('''
-            SELECT rating, COUNT(*) as count 
-            FROM analysis_records 
+            SELECT rating, COUNT(*) as count
+            FROM analysis_records
             GROUP BY rating
         ''')
         rating_distribution = dict(cursor.fetchall())
@@ -228,3 +228,64 @@ class DatabaseManager:
             'average_score': round(avg_score, 2),
             'rating_distribution': rating_distribution
         }
+
+    def delete_analysis(self, record_id: int) -> bool:
+        """
+        删除分析记录
+        Args:
+            record_id: 记录ID
+        Returns:
+            是否成功删除
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute('DELETE FROM analysis_records WHERE id = ?', (record_id,))
+            conn.commit()
+            deleted = cursor.rowcount > 0
+            conn.close()
+            return deleted
+        except Exception as e:
+            conn.close()
+            return False
+
+    def delete_all_analyses(self) -> int:
+        """
+        删除所有分析记录
+        Returns:
+            删除的记录数量
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT COUNT(*) FROM analysis_records')
+        count = cursor.fetchone()[0]
+
+        cursor.execute('DELETE FROM analysis_records')
+        conn.commit()
+        conn.close()
+
+        return count
+
+    def get_full_results(self, record_id: int) -> Optional[Dict]:
+        """
+        获取完整的分析结果JSON
+        Args:
+            record_id: 记录ID
+        Returns:
+            完整结果字典
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT full_results FROM analysis_records WHERE id = ?', (record_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if row and row[0]:
+            try:
+                return json.loads(row[0])
+            except json.JSONDecodeError:
+                return None
+        return None
