@@ -117,12 +117,11 @@ class RelativePositionBias(nn.Module):
         Returns:
             相对位置偏置 (1, num_heads, seq_len, seq_len)
         """
-        relative_position_index = self.relative_position_index[:seq_len, :seq_len]
-        relative_position_bias = self.relative_position_bias_table[relative_position_index.view(-1)].view(
+        relative_position_index = self.relative_position_index[:seq_len, :seq_len].contiguous()
+        relative_position_bias = self.relative_position_bias_table[relative_position_index.reshape(-1)].reshape(
             seq_len, seq_len, -1
         )
-        return relative_position_bias.permute(2, 0, 1).unsqueeze(0)  # (1, num_heads, seq_len, seq_len)
-
+        return relative_position_bias.permute(2, 0, 1).contiguous().unsqueeze(0)
 
 class TransformerEncoderLayer(nn.Module):
     """
@@ -537,3 +536,4 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("✅ 所有测试通过!")
     print("=" * 70)
+
