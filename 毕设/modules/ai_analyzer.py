@@ -288,7 +288,7 @@ class LocalRuleEngine(BaseAIProvider):
         # 关键运动学指标
         report += "### 三、关键技术指标\n\n"
 
-        # 步频分析
+        # 步频分析（新标准）
         cadence_data = kinematic.get('cadence', {})
         if cadence_data:
             cadence = cadence_data.get('cadence', 0)
@@ -300,14 +300,19 @@ class LocalRuleEngine(BaseAIProvider):
             report += f"- 步频: **{cadence:.1f} 步/分**\n"
             report += f"- 检测步数: {step_count} 步 (视频时长 {duration:.1f} 秒)\n"
             if rating:
-                report += f"- 评估: {rating.get('description', '')}\n"
+                report += f"- 等级: {rating.get('description', '')}\n"
 
-            if cadence >= 180:
-                report += f"- 分析: 步频处于理想范围，有助于减少触地时间和受伤风险\n"
-            elif cadence >= 160:
-                report += f"- 分析: 步频适中，可尝试逐步提高至180步/分\n"
+            # 新的步频评估标准
+            if cadence >= 185:
+                report += f"- 分析: 步频达到精英水平，跑步效率极佳\n"
+            elif cadence >= 175:
+                report += f"- 分析: 步频优秀，有助于减少触地时间和受伤风险\n"
+            elif cadence >= 165:
+                report += f"- 分析: 步频良好，可尝试逐步提高至175+步/分\n"
+            elif cadence >= 155:
+                report += f"- 分析: 步频一般，建议进行节拍器训练提高步频\n"
             else:
-                report += f"- 分析: 步频偏低，建议进行节拍器训练提高步频\n"
+                report += f"- 分析: 步频较低，建议系统性训练提高步频至165+步/分\n"
             report += "\n"
 
         # 垂直振幅
@@ -332,18 +337,35 @@ class LocalRuleEngine(BaseAIProvider):
                 report += f"- 分析: 振幅偏大，建议改善跑姿减少能量浪费\n"
             report += "\n"
 
-        # 步态周期时间（毫秒）
+        # 步态周期时间（毫秒）+ 触地时间评级
         gait_cycle = kinematic.get('gait_cycle', {})
         if gait_cycle and 'phase_duration_ms' in gait_cycle:
             phase_ms = gait_cycle['phase_duration_ms']
+            ground_contact_ms = phase_ms.get('ground_contact', 0)
+            flight_ms = phase_ms.get('flight', 0)
+
             report += "**步态周期时间**\n\n"
-            report += "| 阶段 | 平均时长 |\n"
-            report += "|------|----------|\n"
-            report += f"| 触地期 | {phase_ms.get('ground_contact', 0):.1f} ms |\n"
-            report += f"| 腾空期 | {phase_ms.get('flight', 0):.1f} ms |\n"
-            report += f"| 过渡期 | {phase_ms.get('transition', 0):.1f} ms |\n"
+
+            # 触地时间评级（新标准）
+            if ground_contact_ms > 0:
+                if ground_contact_ms < 210:
+                    gc_level = "精英"
+                elif ground_contact_ms < 240:
+                    gc_level = "优秀"
+                elif ground_contact_ms < 270:
+                    gc_level = "良好"
+                elif ground_contact_ms < 300:
+                    gc_level = "一般"
+                else:
+                    gc_level = "较差"
+                report += f"- 触地时间: **{ground_contact_ms:.1f} ms** ({gc_level})\n"
+            else:
+                report += f"- 触地时间: 数据不足\n"
+
+            report += f"- 腾空时间: {flight_ms:.1f} ms\n" if flight_ms > 0 else "- 腾空时间: 数据不足\n"
+
             if gait_cycle.get('avg_cycle_duration_ms', 0) > 0:
-                report += f"| 完整周期 | {gait_cycle.get('avg_cycle_duration_ms', 0):.1f} ms |\n"
+                report += f"- 完整周期: {gait_cycle.get('avg_cycle_duration_ms', 0):.1f} ms\n"
             report += "\n"
 
         # 膝关节角度（侧面视角）
@@ -369,18 +391,16 @@ class LocalRuleEngine(BaseAIProvider):
 
             report += "\n"
 
-        # 稳定性分析
+        # 稳定性分析（移除对称性，突出肩部稳定性）
         stability = kinematic.get('stability', {})
         if stability:
             report += f"**稳定性分析**\n"
             report += f"- 综合稳定性: {stability.get('overall', 0):.1f}/100\n"
             report += f"- 躯干稳定: {stability.get('trunk', 0):.1f}/100\n"
             report += f"- 头部稳定: {stability.get('head', 0):.1f}/100\n"
-            # 只在正面视角显示对称性和肩部晃动
-            if view_angle == 'front' and 'symmetry' in stability:
-                report += f"- 左右对称: {stability.get('symmetry', 0):.1f}/100\n"
-                if 'shoulder_sway' in stability:
-                    report += f"- 肩部稳定: {stability.get('shoulder_sway', 0):.1f}/100\n"
+            # 正面视角显示肩部晃动（移除对称性）
+            if 'shoulder_sway' in stability:
+                report += f"- 肩部稳定: {stability.get('shoulder_sway', 0):.1f}/100\n"
             report += "\n"
 
         # 优势分析

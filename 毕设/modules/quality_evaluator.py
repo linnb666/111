@@ -20,7 +20,7 @@ class QualityEvaluator:
         self.weights = QUALITY_WEIGHTS
         self.thresholds = QUALITY_THRESHOLDS
 
-        # 专业评价标准（基于运动科学研究）
+        # 专业评价标准（基于运动科学研究 - 新标准）
         self.standards = {
             # 垂直振幅标准（相对躯干长度的百分比）
             'vertical_amplitude': {
@@ -30,13 +30,21 @@ class QualityEvaluator:
                 'poor_high': (15, 100), # >15%
                 'poor_low': (0, 3),     # <3%
             },
-            # 步频标准（保留用户原有设定）
+            # 步频标准（新标准：5个等级）
             'cadence': {
-                'optimal': (180, 200),
-                'good_low': (170, 180),
-                'good_high': (200, 210),
-                'fair_low': (160, 170),
-                'fair_high': (210, 220),
+                'elite': (185, 300),     # 185以上 精英
+                'excellent': (175, 185), # 175-185 优秀
+                'good': (165, 175),      # 165-175 良好
+                'fair': (155, 165),      # 155-165 一般
+                'poor': (0, 155),        # <155 较差
+            },
+            # 触地时间标准（新标准：5个等级，毫秒）
+            'ground_contact_time': {
+                'elite': (0, 210),       # <210ms 精英
+                'excellent': (210, 240), # 210-240ms 优秀
+                'good': (240, 270),      # 240-270ms 良好
+                'fair': (270, 300),      # 270-300ms 一般
+                'poor': (300, 1000),     # >300ms 较差
             },
             # 膝关节角度标准
             'knee_angle': {
@@ -243,21 +251,17 @@ class QualityEvaluator:
             return 40  # 振幅过大
 
     def _score_cadence(self, cadence: float) -> float:
-        """评分步频（保留用户原有阈值逻辑）"""
-        stds = self.standards['cadence']
-
-        if stds['optimal'][0] <= cadence <= stds['optimal'][1]:
-            return 100
-        elif stds['good_low'][0] <= cadence < stds['good_low'][1]:
-            return 85
-        elif stds['good_high'][0] < cadence <= stds['good_high'][1]:
-            return 85
-        elif stds['fair_low'][0] <= cadence < stds['fair_low'][1]:
-            return 70
-        elif stds['fair_high'][0] < cadence <= stds['fair_high'][1]:
-            return 70
+        """评分步频（新标准：5个等级）"""
+        if cadence >= 185:
+            return 100  # 精英
+        elif cadence >= 175:
+            return 90   # 优秀
+        elif cadence >= 165:
+            return 75   # 良好
+        elif cadence >= 155:
+            return 60   # 一般
         else:
-            return 50
+            return 45   # 较差
 
     def _evaluate_form_improved(self, kinematic: Dict) -> float:
         """改进的跑姿评估"""

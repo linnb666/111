@@ -167,7 +167,7 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
                 for i, kf in enumerate(keyframe_data[row_start:row_start+3]):
                     with cols[i]:
                         st.image(kf['path'], caption=f"时间: {kf['time_sec']:.2f}s",
-                                 use_column_width=True)  # 兼容旧版Streamlit
+                                 width=None)  # 使用自适应宽度
                         if not kf['detected']:
                             st.caption("⚠️ 未检测到姿态")
 
@@ -196,29 +196,17 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
             view_angle=detected_view
         )
 
-        # 7. AI文本生成
-        status_text.text("7️⃣ AI文本分析中...")
-        progress_bar.progress(90)
-        results_for_ai = {
+        # 7. 生成本地规则引擎报告（始终生成）
+        status_text.text("7️⃣ 生成本地分析报告...")
+        progress_bar.progress(95)
+        results_for_report = {
             'quality_evaluation': quality_results,
             'kinematic_analysis': kinematic_results,
             'temporal_analysis': temporal_results,
             'view_angle': detected_view
         }
-        ai_text = components['ai'].generate_analysis_report(results_for_ai)
-
-        # 8. 多模态时间段分析（如果有关键帧数据）
-        time_segment_analysis = ""
-        if keyframe_data and len(keyframe_data) > 0:
-            status_text.text("8️⃣ 多模态时间段分析中...")
-            progress_bar.progress(95)
-            try:
-                time_segment_analysis = components['ai'].analyze_time_segments(
-                    keyframe_data, kinematic_results
-                )
-            except Exception as e:
-                st.warning(f"时间段分析失败: {e}")
-                time_segment_analysis = ""
+        # 使用本地规则引擎生成报告
+        local_report = components['ai'].local_engine.generate_analysis_report(results_for_report)
 
         # 完成
         progress_bar.progress(100)
@@ -226,7 +214,7 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
 
         # 显示结果
         st.markdown("---")
-        display_results(quality_results, kinematic_results, temporal_results, ai_text, detected_view, time_segment_analysis)
+        display_results(quality_results, kinematic_results, temporal_results, local_report, detected_view, results_for_report)
 
         # 保存到数据库
         complete_results = {
@@ -234,7 +222,7 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
             'kinematic_analysis': kinematic_results,
             'temporal_analysis': temporal_results,
             'quality_evaluation': quality_results,
-            'ai_analysis': ai_text,
+            'ai_analysis': local_report,
             'view_angle': detected_view
         }
         record_id = components['db'].save_analysis(complete_results)
@@ -375,7 +363,7 @@ def extract_keyframes_with_poses(frames, keypoints_sequence, fps, estimator, num
     return keyframe_paths
 
 
-def display_results(quality, kinematic, temporal, ai_text, view_angle='side', time_segment_analysis=''):
+def display_results(quality, kinematic, temporal, local_report, view_angle='side', results_for_ai=None):
     """显示分析结果"""
     st.header("📊 分析结果")
 
@@ -398,7 +386,7 @@ def display_results(quality, kinematic, temporal, ai_text, view_angle='side', ti
         if quality.get('weaknesses'):
             st.markdown(f"**薄弱项:** {', '.join(quality['weaknesses'][:3])}")
 
-    # 各维度得分（移除节奏）
+    # 各维度得分
     st.subheader("📈 各维度表现")
     cols = st.columns(3)
     dimensions = quality.get('dimension_scores', {})
@@ -432,11 +420,40 @@ def display_results(quality, kinematic, temporal, ai_text, view_angle='side', ti
     else:
         col3.metric("垂直振幅", "数据不足")
 
+    # 触地时间显示
+    gait_cycle = kinematic.get('gait_cycle', {})
+    phase_duration = gait_cycle.get('phase_duration_ms', {})
+    if phase_duration:
+        st.subheader("⏱️ 步态时间")
+        time_cols = st.columns(3)
+        ground_contact_ms = phase_duration.get('ground_contact', 0)
+        flight_ms = phase_duration.get('flight', 0)
+
+        # 触地时间评级
+        if ground_contact_ms > 0:
+            if ground_contact_ms < 210:
+                gc_rating = "精英"
+            elif ground_contact_ms < 240:
+                gc_rating = "优秀"
+            elif ground_contact_ms < 270:
+                gc_rating = "良好"
+            elif ground_contact_ms < 300:
+                gc_rating = "一般"
+            else:
+                gc_rating = "较差"
+            time_cols[0].metric("触地时间", f"{ground_contact_ms:.1f} ms", delta=gc_rating)
+        else:
+            time_cols[0].metric("触地时间", "数据不足")
+
+        time_cols[1].metric("腾空时间", f"{flight_ms:.1f} ms" if flight_ms > 0 else "数据不足")
+
+        cycle_ms = gait_cycle.get('avg_cycle_duration_ms', 0)
+        time_cols[2].metric("步态周期", f"{cycle_ms:.1f} ms" if cycle_ms > 0 else "数据不足")
+
     # 膝关节角度分析（侧面视角重点）
     if view_angle == 'side':
         angles = kinematic.get('angles', {})
 
-        # phase_analysis 直接在 angles 下，不是在 angles['knee'] 下
         if 'phase_analysis' in angles:
             st.subheader("🦵 膝关节角度分析（分阶段）")
             phase_analysis = angles['phase_analysis']
@@ -467,7 +484,7 @@ def display_results(quality, kinematic, temporal, ai_text, view_angle='side', ti
                 st.caption(f"范围: {tr.get('min', 0):.1f}° - {tr.get('max', 0):.1f}°")
                 st.caption(f"帧数: {tr.get('count', 0)}")
 
-    # 对称性分析（正面视角重点）
+    # 正面视角分析（移除对称性，保留下肢力线和肩部稳定）
     if view_angle == 'front':
         # 下肢力线分析
         lower_limb = kinematic.get('lower_limb_alignment', {})
@@ -488,11 +505,20 @@ def display_results(quality, kinematic, temporal, ai_text, view_angle='side', ti
                 st.metric("偏移角度", f"{right_leg.get('mean', 0):.1f}°")
                 st.caption(f"问题: {right_leg.get('issue', 'unknown')}")
 
-        # 对称性分析
-        symmetry = kinematic.get('gait_symmetry', {})
-        if symmetry:
-            st.subheader("⚖️ 对称性分析")
-            st.metric("整体对称性", f"{symmetry.get('overall_score', 0):.1f}%")
+        # 肩部稳定性分析（正面视角重点）
+        stability = kinematic.get('stability', {})
+        if stability and 'shoulder_sway' in stability:
+            st.subheader("💪 肩部稳定性")
+            st.metric("肩部稳定评分", f"{stability.get('shoulder_sway', 0):.1f}/100")
+
+        # 横向稳定性
+        lateral = kinematic.get('lateral_stability', {})
+        if lateral:
+            st.subheader("↔️ 横向稳定性")
+            lat_cols = st.columns(3)
+            lat_cols[0].metric("髋部横摆", f"{lateral.get('hip_sway', 0):.2f}%")
+            lat_cols[1].metric("肩部横摆", f"{lateral.get('shoulder_sway', 0):.2f}%")
+            lat_cols[2].metric("稳定评分", f"{lateral.get('stability_score', 0):.1f}")
 
     # 深度学习结果
     st.subheader("🤖 深度学习分析")
@@ -513,14 +539,24 @@ def display_results(quality, kinematic, temporal, ai_text, view_angle='side', ti
         for i, suggestion in enumerate(quality['suggestions'], 1):
             st.markdown(f"{i}. {suggestion}")
 
-    # AI分析文本
-    st.subheader("📝 AI深度分析")
-    st.markdown(ai_text)
+    # 本地分析报告（始终显示）
+    st.subheader("📝 本地分析报告")
+    st.markdown(local_report)
 
-    # 时间段问题分析（多模态）
-    if time_segment_analysis:
-        st.subheader("🔍 多模态时间段分析")
-        st.markdown(time_segment_analysis)
+    # AI大模型分析按钮（用户自行决定是否使用）
+    st.markdown("---")
+    st.subheader("🤖 AI智能分析（可选）")
+    st.info("点击下方按钮使用智谱AI大模型对数据进行深度分析和总结建议。")
+
+    if st.button("🚀 启动AI智能分析", type="secondary"):
+        if results_for_ai:
+            with st.spinner("正在调用智谱AI进行深度分析..."):
+                try:
+                    ai_response = components['ai'].generate_analysis_report(results_for_ai)
+                    st.subheader("🧠 AI深度分析结果")
+                    st.markdown(ai_response)
+                except Exception as e:
+                    st.error(f"AI分析失败: {e}")
 
 
 def history_page():
