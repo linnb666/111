@@ -85,14 +85,12 @@ class QualityEvaluator:
         stability_score = scores['stability']
         efficiency_score = scores['efficiency']
         form_score = scores['form']
-        rhythm_score = scores['rhythm']
 
         # 加权计算总分
         total_score = (
             stability_score * self.weights['stability'] +
             efficiency_score * self.weights['efficiency'] +
-            form_score * self.weights['form'] +
-            rhythm_score * self.weights['rhythm']
+            form_score * self.weights['form']
         )
 
         # 生成评级
@@ -114,8 +112,7 @@ class QualityEvaluator:
             'dimension_scores': {
                 'stability': round(stability_score, 2),
                 'efficiency': round(efficiency_score, 2),
-                'form': round(form_score, 2),
-                'rhythm': round(rhythm_score, 2)
+                'form': round(form_score, 2)
             },
             'detailed_analysis': detailed_analysis,
             'suggestions': suggestions,
@@ -136,9 +133,6 @@ class QualityEvaluator:
 
         # 3. 跑姿评估（分阶段膝关节角度 + 前倾）
         scores['form'] = self._evaluate_form_improved(kinematic)
-
-        # 4. 节奏评估
-        scores['rhythm'] = self._evaluate_rhythm_improved(kinematic)
 
         return scores
 
@@ -163,13 +157,6 @@ class QualityEvaluator:
             scores['form'] = rating.get('score', 60)
         else:
             scores['form'] = 60
-
-        # 节奏（对称性）
-        if 'gait_symmetry' in kinematic:
-            symmetry = kinematic['gait_symmetry']
-            scores['rhythm'] = symmetry.get('overall_score', 50)
-        else:
-            scores['rhythm'] = self._evaluate_rhythm_improved(kinematic)
 
         return scores
 
@@ -336,39 +323,6 @@ class QualityEvaluator:
         else:
             return 50
 
-    def _evaluate_rhythm_improved(self, kinematic: Dict) -> float:
-        """改进的节奏评估"""
-        scores = []
-
-        # 步频置信度（多方法一致性）
-        if 'cadence' in kinematic:
-            confidence = kinematic['cadence'].get('confidence', 0.5)
-            confidence_score = confidence * 100
-            scores.append(confidence_score)
-
-        # 步态周期一致性
-        if 'gait_cycle' in kinematic:
-            gait = kinematic['gait_cycle']
-            if 'phase_distribution' in gait:
-                dist = gait['phase_distribution']
-                # 计算分布的稳定性
-                values = [dist.get('ground_contact', 0),
-                          dist.get('flight', 0),
-                          dist.get('transition', 0)]
-                if sum(values) > 0:
-                    # 如果分布合理，给高分
-                    if 0.3 <= values[0] <= 0.6 and 0.2 <= values[1] <= 0.5:
-                        scores.append(80)
-                    else:
-                        scores.append(60)
-
-        # 稳定性中的对称性
-        if 'stability' in kinematic:
-            symmetry = kinematic['stability'].get('symmetry', 50)
-            scores.append(symmetry)
-
-        return np.mean(scores) if scores else 65.0
-
     def _get_rating(self, score: float) -> str:
         """根据分数获取评级"""
         if score >= self.thresholds['excellent']:
@@ -508,9 +462,6 @@ class QualityEvaluator:
                 elif lean > 20:
                     suggestions.append("避免过度前倾，保持自然跑姿")
 
-        if scores['rhythm'] < 70:
-            suggestions.append("保持步频节奏稳定，避免速度忽快忽慢")
-
         # 如果没有明显问题
         if not suggestions:
             suggestions.append("继续保持良好状态，可适当增加训练量挑战自己")
@@ -523,8 +474,7 @@ class QualityEvaluator:
         score_names = {
             'stability': '动作稳定性',
             'efficiency': '跑步效率',
-            'form': '跑姿标准度',
-            'rhythm': '节奏一致性'
+            'form': '跑姿标准度'
         }
 
         for key, name in score_names.items():
@@ -539,8 +489,7 @@ class QualityEvaluator:
         score_names = {
             'stability': '动作稳定性',
             'efficiency': '跑步效率',
-            'form': '跑姿标准度',
-            'rhythm': '节奏一致性'
+            'form': '跑姿标准度'
         }
 
         for key, name in score_names.items():

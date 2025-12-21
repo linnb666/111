@@ -76,18 +76,16 @@ def video_analysis_page():
     """视频分析页面"""
     st.header("📹 视频分析")
 
-    # 分析选项
-    with st.expander("⚙️ 分析选项", expanded=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            auto_detect_view = st.checkbox("自动检测视角", value=True,
-                                           help="自动识别视频是侧面、正面还是混合视角")
-        with col2:
-            manual_view = st.selectbox(
-                "手动指定视角",
-                ["自动", "侧面", "正面", "背面"],
-                disabled=auto_detect_view
-            )
+    # 视角选择（必须手动选择）
+    st.info("📐 请根据您的视频拍摄角度选择正确的视角")
+    view_angle = st.radio(
+        "选择视频拍摄视角",
+        ["侧面视角", "正面视角"],
+        horizontal=True,
+        help="侧面视角：从跑者侧面拍摄，适合分析膝关节角度、垂直振幅、躯干前倾。\n正面视角：从跑者正前方拍摄，适合分析左右对称性、下肢力线。"
+    )
+
+    selected_view = "side" if view_angle == "侧面视角" else "front"
 
     # 文件上传
     uploaded_file = st.file_uploader(
@@ -107,13 +105,10 @@ def video_analysis_page():
 
         # 分析按钮
         if st.button("🔍 开始分析", type="primary"):
-            view_override = None if auto_detect_view else {
-                "自动": None, "侧面": "side", "正面": "front", "背面": "back"
-            }.get(manual_view)
-            analyze_video(video_path, view_override)
+            analyze_video(video_path, selected_view)
 
 
-def analyze_video(video_path: str, view_override: str = None):
+def analyze_video(video_path: str, selected_view: str = 'side'):
     """执行视频分析"""
     try:
         # 进度显示
@@ -143,25 +138,11 @@ def analyze_video(video_path: str, view_override: str = None):
         detected_count = sum(1 for kp in keypoints_sequence if kp['detected'])
         st.info(f"✓ 姿态检测成功: {detected_count}/{len(keypoints_sequence)} 帧 ({detected_count/len(keypoints_sequence)*100:.1f}%)")
 
-        # 3. 视角检测
-        status_text.text("3️⃣ 视角检测中...")
+        # 3. 使用用户选择的视角
+        status_text.text("3️⃣ 确认分析视角...")
         progress_bar.progress(30)
-
-        if view_override:
-            detected_view = view_override
-            view_confidence = 1.0
-            st.info(f"📐 使用手动指定视角: {get_view_name(detected_view)}")
-        else:
-            view_detector = ViewAngleDetector()
-            view_result = view_detector.detect_view_angle(keypoints_sequence)
-            detected_view = view_result['primary_view']  # 修复: 使用正确的键名
-            view_confidence = view_result['confidence']
-
-            # 显示视角检测结果
-            view_col1, view_col2, view_col3 = st.columns(3)
-            view_col1.metric("检测视角", get_view_name(detected_view))
-            view_col2.metric("置信度", f"{view_confidence*100:.1f}%")
-            view_col3.metric("分析策略", get_strategy_name(detected_view))
+        detected_view = selected_view
+        st.info(f"📐 使用视角: {get_view_name(detected_view)} - {get_strategy_name(detected_view)}")
 
         # 生成姿态识别内容
         status_text.text("3️⃣ 生成姿态识别视频与关键帧...")
@@ -186,7 +167,7 @@ def analyze_video(video_path: str, view_override: str = None):
                 for i, kf in enumerate(keyframe_data[row_start:row_start+3]):
                     with cols[i]:
                         st.image(kf['path'], caption=f"时间: {kf['time_sec']:.2f}s",
-                                 use_container_width=True)
+                                 use_column_width=True)  # 兼容旧版Streamlit
                         if not kf['detected']:
                             st.caption("⚠️ 未检测到姿态")
 
@@ -197,7 +178,7 @@ def analyze_video(video_path: str, view_override: str = None):
         adaptive_analyzer = AdaptiveAnalyzer()
         kinematic_results = adaptive_analyzer.analyze(
             keypoints_sequence, fps,
-            view_angle=detected_view if not view_override else view_override
+            view_angle=detected_view
         )
 
         # 5. 深度学习分析
@@ -273,9 +254,7 @@ def get_view_name(view: str) -> str:
     """获取视角中文名称"""
     names = {
         'side': '侧面视角',
-        'front': '正面视角',
-        'back': '背面视角',
-        'mixed': '混合视角'
+        'front': '正面视角'
     }
     return names.get(view, view)
 
@@ -283,10 +262,8 @@ def get_view_name(view: str) -> str:
 def get_strategy_name(view: str) -> str:
     """获取分析策略名称"""
     strategies = {
-        'side': '膝角+振幅+躯干',
-        'front': '对称性+髋部+膝外翻',
-        'back': '对称性+足跟',
-        'mixed': '综合分析'
+        'side': '膝角+振幅+躯干前倾',
+        'front': '对称性+下肢力线+肩部晃动'
     }
     return strategies.get(view, '标准分析')
 
@@ -421,15 +398,14 @@ def display_results(quality, kinematic, temporal, ai_text, view_angle='side', ti
         if quality.get('weaknesses'):
             st.markdown(f"**薄弱项:** {', '.join(quality['weaknesses'][:3])}")
 
-    # 各维度得分
+    # 各维度得分（移除节奏）
     st.subheader("📈 各维度表现")
-    cols = st.columns(4)
+    cols = st.columns(3)
     dimensions = quality.get('dimension_scores', {})
 
     cols[0].metric("稳定性", f"{dimensions.get('stability', 0):.1f}")
     cols[1].metric("效率", f"{dimensions.get('efficiency', 0):.1f}")
     cols[2].metric("跑姿", f"{dimensions.get('form', 0):.1f}")
-    cols[3].metric("节奏", f"{dimensions.get('rhythm', 0):.1f}")
 
     # 运动学指标 - 根据视角显示不同信息
     st.subheader("🔬 运动学指标")
@@ -457,7 +433,7 @@ def display_results(quality, kinematic, temporal, ai_text, view_angle='side', ti
         col3.metric("垂直振幅", "数据不足")
 
     # 膝关节角度分析（侧面视角重点）
-    if view_angle in ['side', 'mixed']:
+    if view_angle == 'side':
         angles = kinematic.get('angles', {})
 
         # phase_analysis 直接在 angles 下，不是在 angles['knee'] 下
@@ -491,19 +467,32 @@ def display_results(quality, kinematic, temporal, ai_text, view_angle='side', ti
                 st.caption(f"范围: {tr.get('min', 0):.1f}° - {tr.get('max', 0):.1f}°")
                 st.caption(f"帧数: {tr.get('count', 0)}")
 
-    # 对称性分析（正面/背面视角重点）
-    if view_angle in ['front', 'back', 'mixed']:
-        symmetry = kinematic.get('symmetry', {})
+    # 对称性分析（正面视角重点）
+    if view_angle == 'front':
+        # 下肢力线分析
+        lower_limb = kinematic.get('lower_limb_alignment', {})
+        if lower_limb:
+            st.subheader("🦿 下肢力线分析")
+            limb_cols = st.columns(2)
+
+            left_leg = lower_limb.get('left_leg', {})
+            right_leg = lower_limb.get('right_leg', {})
+
+            with limb_cols[0]:
+                st.markdown("**左腿**")
+                st.metric("偏移角度", f"{left_leg.get('mean', 0):.1f}°")
+                st.caption(f"问题: {left_leg.get('issue', 'unknown')}")
+
+            with limb_cols[1]:
+                st.markdown("**右腿**")
+                st.metric("偏移角度", f"{right_leg.get('mean', 0):.1f}°")
+                st.caption(f"问题: {right_leg.get('issue', 'unknown')}")
+
+        # 对称性分析
+        symmetry = kinematic.get('gait_symmetry', {})
         if symmetry:
             st.subheader("⚖️ 对称性分析")
-            sym_cols = st.columns(3)
-
-            sym_cols[0].metric("肩部对称性",
-                               f"{symmetry.get('shoulder_symmetry', 0)*100:.1f}%")
-            sym_cols[1].metric("髋部对称性",
-                               f"{symmetry.get('hip_symmetry', 0)*100:.1f}%")
-            sym_cols[2].metric("整体对称性",
-                               f"{symmetry.get('overall_symmetry', 0)*100:.1f}%")
+            st.metric("整体对称性", f"{symmetry.get('overall_score', 0):.1f}%")
 
     # 深度学习结果
     st.subheader("🤖 深度学习分析")
@@ -538,19 +527,102 @@ def history_page():
     """历史记录页面"""
     st.header("📜 历史记录")
 
-    records = components['db'].get_recent_analyses(20)
+    # 管理选项
+    with st.expander("🛠️ 管理选项", expanded=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ 清空所有记录", type="secondary"):
+                count = components['db'].delete_all_analyses()
+                st.success(f"已删除 {count} 条记录")
+                st.rerun()
+
+        with col2:
+            if st.button("🧹 清理临时文件", type="secondary"):
+                cleanup_temp_files()
+                st.success("临时文件清理完成")
+
+    # 获取记录
+    records = components['db'].get_recent_analyses(50)
 
     if not records:
         st.info("暂无历史记录")
         return
 
+    st.markdown(f"共 **{len(records)}** 条记录")
+
     for record in records:
-        with st.expander(f"📹 {record['video_filename']} - {record['analysis_date']}"):
+        record_id = record.get('id', 0)
+        with st.expander(f"📹 {record['video_filename']} - {record['analysis_date']} (ID: {record_id})"):
+            # 基本信息
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("评分", f"{record['total_score']:.1f}")
             col2.metric("评级", record['rating'])
             col3.metric("时长", f"{record['video_duration']:.1f}秒")
             col4.metric("步频", f"{record['cadence']:.1f}")
+
+            # 各维度得分
+            st.markdown("**各维度得分:**")
+            dim_cols = st.columns(3)
+            dim_cols[0].metric("稳定性", f"{record.get('stability_score', 0):.1f}")
+            dim_cols[1].metric("效率", f"{record.get('efficiency_score', 0):.1f}")
+            dim_cols[2].metric("跑姿", f"{record.get('form_score', 0):.1f}")
+
+            # 深度学习结果
+            st.markdown("**深度学习分析:**")
+            dl_cols = st.columns(2)
+            dl_cols[0].metric("AI质量评分", f"{record.get('dl_quality_score', 0):.1f}")
+            dl_cols[1].metric("AI稳定性", f"{record.get('dl_stability_score', 0):.1f}")
+
+            # AI分析文本
+            ai_text = record.get('ai_analysis_text', '')
+            if ai_text:
+                with st.container():
+                    st.markdown("**AI分析报告:**")
+                    st.markdown(ai_text)
+
+            # 操作按钮
+            st.markdown("---")
+            btn_col1, btn_col2 = st.columns(2)
+            with btn_col1:
+                if st.button(f"📊 查看完整数据", key=f"view_{record_id}"):
+                    full_results = components['db'].get_full_results(record_id)
+                    if full_results:
+                        st.json(full_results)
+                    else:
+                        st.warning("完整数据不可用")
+
+            with btn_col2:
+                if st.button(f"🗑️ 删除记录", key=f"delete_{record_id}"):
+                    if components['db'].delete_analysis(record_id):
+                        st.success("记录已删除")
+                        st.rerun()
+                    else:
+                        st.error("删除失败")
+
+
+def cleanup_temp_files():
+    """清理临时文件"""
+    import shutil
+    from pathlib import Path
+
+    cleanup_dirs = [
+        Path("output/videos"),
+        Path("output/keyframes"),
+        Path("output/visualizations")
+    ]
+
+    total_cleaned = 0
+    for dir_path in cleanup_dirs:
+        if dir_path.exists():
+            for file in dir_path.glob("*"):
+                try:
+                    if file.is_file():
+                        file.unlink()
+                        total_cleaned += 1
+                except Exception:
+                    pass
+
+    return total_cleaned
 
 
 def statistics_page():
@@ -576,27 +648,38 @@ def settings_page():
     st.info(f"当前后端: {POSE_CONFIG['backend'].upper()}")
     st.caption("如需切换姿态估计后端，请修改配置文件 config/config.py")
 
-    st.subheader("视角检测设置")
-    with st.expander("查看当前配置"):
-        st.json(VIEW_DETECTION_CONFIG)
+    st.subheader("视角设置")
+    st.markdown("""
+    **支持的视角:**
+    - **侧面视角**: 分析膝关节角度、垂直振幅、躯干前倾、手臂摆动
+    - **正面视角**: 分析左右对称性、下肢力线、肩部晃动
+    """)
 
     st.subheader("AI分析设置")
-    st.caption("支持的AI提供商: OpenAI, Anthropic, 通义千问, 智谱AI")
-    st.caption("如需启用AI分析，请在环境变量中配置相应的API密钥")
+    st.markdown("**使用智谱AI (glm-4.6模型)**")
+    st.caption("需要安装zai库：pip install zai")
 
-    # 显示环境变量状态
+    # 显示智谱AI状态
     import os
-    providers = {
-        'OpenAI': 'OPENAI_API_KEY',
-        'Anthropic': 'ANTHROPIC_API_KEY',
-        '通义千问': 'DASHSCOPE_API_KEY',
-        '智谱AI': 'ZHIPU_API_KEY'
-    }
+    from config.config import AI_CONFIG
+    api_key = AI_CONFIG.get('api_key', '')
 
-    st.markdown("**API密钥状态:**")
-    for name, env_var in providers.items():
-        status = "✅ 已配置" if os.getenv(env_var) else "❌ 未配置"
-        st.markdown(f"- {name}: {status}")
+    if api_key:
+        st.success("智谱AI已配置")
+        st.caption(f"API Key: {api_key[:10]}...{api_key[-4:]}")
+    else:
+        st.warning("智谱AI未配置，将使用本地规则引擎")
+        st.caption("请在 config/config.py 中配置 ZHIPU_API_KEY")
+
+    st.subheader("评价维度")
+    st.markdown("""
+    **技术质量评分维度（已移除节奏一致性）:**
+    | 维度 | 权重 | 说明 |
+    |------|------|------|
+    | 动作稳定性 | 35% | 躯干稳定、头部稳定 |
+    | 跑步效率 | 35% | 垂直振幅、步频 |
+    | 跑姿标准度 | 30% | 膝关节角度、躯干前倾 |
+    """)
 
 
 if __name__ == '__main__':

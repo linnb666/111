@@ -117,12 +117,12 @@ class KinematicAnalyzer:
             'cadence': self._calculate_cadence_improved(valid_frames, fps),
             'stride_info': self._calculate_stride_info(valid_frames, fps),
 
-            # 稳定性指标
-            'stability': self._calculate_stability_improved(valid_frames),
+            # 稳定性指标（侧面不评估左右对称性）
+            'stability': self._calculate_stability_side_view(valid_frames),
             'body_lean': self._calculate_body_lean(valid_frames),
             'arm_swing': self._calculate_arm_swing(valid_frames),
 
-            # 步态周期分析
+            # 步态周期分析（包含毫秒时间）
             'gait_cycle': self._analyze_gait_cycle(valid_frames, fps),
         }
         return results
@@ -408,41 +408,86 @@ class KinematicAnalyzer:
 
     def _analyze_gait_cycle(self, keypoints_sequence: List[Dict], fps: float) -> Dict:
         """
-        分析完整步态周期
+        分析完整步态周期（改进版：输出毫秒时间）
         """
         phases = self._detect_gait_phases(keypoints_sequence, fps)
 
         # 统计各阶段占比
         total = len(phases)
-        ground_contact_ratio = phases.count(self.PHASE_GROUND_CONTACT) / total if total > 0 else 0
-        flight_ratio = phases.count(self.PHASE_FLIGHT) / total if total > 0 else 0
-        transition_ratio = phases.count(self.PHASE_TRANSITION) / total if total > 0 else 0
+        ground_contact_count = phases.count(self.PHASE_GROUND_CONTACT)
+        flight_count = phases.count(self.PHASE_FLIGHT)
+        transition_count = phases.count(self.PHASE_TRANSITION)
 
-        # 计算步态周期时间
-        # 寻找连续的触地-腾空-触地周期
+        ground_contact_ratio = ground_contact_count / total if total > 0 else 0
+        flight_ratio = flight_count / total if total > 0 else 0
+        transition_ratio = transition_count / total if total > 0 else 0
+
+        # 计算各阶段平均时间（毫秒）
+        frame_duration_ms = 1000.0 / fps  # 每帧时长(ms)
+
+        # 寻找连续的阶段片段来计算平均时长
+        ground_contact_durations_ms = []
+        flight_durations_ms = []
+        transition_durations_ms = []
+
+        current_phase = phases[0] if phases else -1
+        segment_start = 0
+
+        for i in range(1, len(phases)):
+            if phases[i] != current_phase:
+                # 阶段切换，记录前一个阶段的时长
+                segment_frames = i - segment_start
+                segment_ms = segment_frames * frame_duration_ms
+
+                if current_phase == self.PHASE_GROUND_CONTACT:
+                    ground_contact_durations_ms.append(segment_ms)
+                elif current_phase == self.PHASE_FLIGHT:
+                    flight_durations_ms.append(segment_ms)
+                elif current_phase == self.PHASE_TRANSITION:
+                    transition_durations_ms.append(segment_ms)
+
+                current_phase = phases[i]
+                segment_start = i
+
+        # 处理最后一个片段
+        if phases:
+            segment_frames = len(phases) - segment_start
+            segment_ms = segment_frames * frame_duration_ms
+            if current_phase == self.PHASE_GROUND_CONTACT:
+                ground_contact_durations_ms.append(segment_ms)
+            elif current_phase == self.PHASE_FLIGHT:
+                flight_durations_ms.append(segment_ms)
+            elif current_phase == self.PHASE_TRANSITION:
+                transition_durations_ms.append(segment_ms)
+
+        # 计算平均时长
+        avg_ground_contact_ms = np.mean(ground_contact_durations_ms) if ground_contact_durations_ms else 0
+        avg_flight_ms = np.mean(flight_durations_ms) if flight_durations_ms else 0
+        avg_transition_ms = np.mean(transition_durations_ms) if transition_durations_ms else 0
+
+        # 计算步态周期时间（触地到下一次触地）
         cycle_durations = []
         i = 0
         while i < len(phases) - 1:
             if phases[i] == self.PHASE_GROUND_CONTACT:
-                # 找到下一个触地期的开始
                 start = i
                 j = i + 1
                 while j < len(phases) and phases[j] != self.PHASE_GROUND_CONTACT:
                     j += 1
                 if j < len(phases):
-                    # 继续找当前触地期结束
                     k = j + 1
                     while k < len(phases) and phases[k] == self.PHASE_GROUND_CONTACT:
                         k += 1
                     if k > j:
                         cycle_duration = (j - start) / fps
-                        if 0.3 < cycle_duration < 1.5:  # 合理的步态周期范围
+                        if 0.3 < cycle_duration < 1.5:
                             cycle_durations.append(cycle_duration)
                 i = j
             else:
                 i += 1
 
         avg_cycle_duration = np.mean(cycle_durations) if cycle_durations else 0
+        avg_cycle_duration_ms = avg_cycle_duration * 1000
 
         return {
             'phase_distribution': {
@@ -450,7 +495,14 @@ class KinematicAnalyzer:
                 'flight': float(flight_ratio),
                 'transition': float(transition_ratio),
             },
+            # 各阶段时间（毫秒）
+            'phase_duration_ms': {
+                'ground_contact': float(round(avg_ground_contact_ms, 1)),
+                'flight': float(round(avg_flight_ms, 1)),
+                'transition': float(round(avg_transition_ms, 1)),
+            },
             'avg_cycle_duration': float(avg_cycle_duration),
+            'avg_cycle_duration_ms': float(round(avg_cycle_duration_ms, 1)),
             'cycle_count': len(cycle_durations),
             'phases': phases,
             # 评估
@@ -530,28 +582,47 @@ class KinematicAnalyzer:
                     valgus_angle = np.degrees(np.arctan(knee_offset / hip_ankle_dist))
                     right_valgus_angles.append(valgus_angle)
 
-        # 统计分析
+        # 统计分析（提高灵敏度）
         def analyze_alignment(angles, side):
             if not angles:
                 return {'mean': 0, 'max': 0, 'issue': 'unknown', 'severity': 'unknown'}
 
             mean_angle = np.mean(angles)
             max_angle = np.max(np.abs(angles))
+            std_angle = np.std(angles)
 
-            # 判断问题类型
-            if mean_angle > 5:
+            # 判断问题类型（降低阈值提高灵敏度）
+            # 使用2度作为正常/异常的分界点
+            if mean_angle > 2:
                 issue = 'valgus'  # 膝外翻
-                severity = 'mild' if mean_angle < 10 else 'moderate' if mean_angle < 15 else 'severe'
-            elif mean_angle < -5:
+                if mean_angle < 5:
+                    severity = 'mild'
+                elif mean_angle < 8:
+                    severity = 'moderate'
+                else:
+                    severity = 'severe'
+            elif mean_angle < -2:
                 issue = 'varus'  # 膝内扣
-                severity = 'mild' if mean_angle > -10 else 'moderate' if mean_angle > -15 else 'severe'
+                if mean_angle > -5:
+                    severity = 'mild'
+                elif mean_angle > -8:
+                    severity = 'moderate'
+                else:
+                    severity = 'severe'
             else:
                 issue = 'normal'
                 severity = 'none'
 
+            # 添加动态偏移检测（标准差大说明存在不稳定）
+            if std_angle > 3:
+                if issue == 'normal':
+                    issue = 'unstable'
+                    severity = 'mild'
+
             return {
                 'mean': float(mean_angle),
                 'max': float(max_angle),
+                'std': float(std_angle),
                 'issue': issue,
                 'severity': severity
             }
@@ -565,21 +636,32 @@ class KinematicAnalyzer:
         }
 
     def _rate_lower_limb_alignment(self, left_angles: List, right_angles: List) -> Dict:
-        """评估下肢力线"""
+        """评估下肢力线（提高灵敏度）"""
         if not left_angles or not right_angles:
             return {'level': 'unknown', 'score': 0, 'description': '数据不足'}
+
+        # 使用平均偏移和最大偏移的加权组合
+        left_mean = np.mean(np.abs(left_angles)) if left_angles else 0
+        right_mean = np.mean(np.abs(right_angles)) if right_angles else 0
+        mean_deviation = (left_mean + right_mean) / 2
 
         max_deviation = max(
             np.max(np.abs(left_angles)) if left_angles else 0,
             np.max(np.abs(right_angles)) if right_angles else 0
         )
 
-        if max_deviation < 5:
-            return {'level': 'excellent', 'score': 100, 'description': '下肢力线良好'}
-        elif max_deviation < 10:
-            return {'level': 'good', 'score': 80, 'description': '下肢力线基本正常'}
-        elif max_deviation < 15:
-            return {'level': 'fair', 'score': 60, 'description': '存在轻度膝关节偏移'}
+        # 综合得分：70%平均偏移 + 30%最大偏移
+        combined_deviation = mean_deviation * 0.7 + max_deviation * 0.3
+
+        # 更严格的阈值
+        if combined_deviation < 2:
+            return {'level': 'excellent', 'score': 100, 'description': '下肢力线非常标准'}
+        elif combined_deviation < 4:
+            return {'level': 'good', 'score': 85, 'description': '下肢力线良好'}
+        elif combined_deviation < 6:
+            return {'level': 'fair', 'score': 70, 'description': '存在轻度膝关节偏移'}
+        elif combined_deviation < 10:
+            return {'level': 'moderate', 'score': 55, 'description': '膝关节偏移需要注意'}
         else:
             return {'level': 'poor', 'score': 40, 'description': '膝关节偏移明显，建议关注'}
 
@@ -782,10 +864,10 @@ class KinematicAnalyzer:
         # 方法3: 基于髋部运动
         cadence3, step_count3 = self._cadence_from_hip_motion(keypoints_sequence, fps)
 
-        # 加权平均（脚踝方法权重最高）
+        # 只使用踝关节方法（用户要求）
         cadences = [cadence1, cadence2, cadence3]
         step_counts = [step_count1, step_count2, step_count3]
-        weights = [0.2, 0.6, 0.2]
+        weights = [0, 1, 0]  # 仅踝关节
 
         valid_data = [(c, s, w) for c, s, w in zip(cadences, step_counts, weights) if c > 0 and s > 0]
         if valid_data:
@@ -959,21 +1041,69 @@ class KinematicAnalyzer:
         ground_frames = sum(1 for v in ankle_velocities if v < threshold)
         return ground_frames / len(ankle_velocities)
 
+    def _calculate_stability_side_view(self, keypoints_sequence: List[Dict]) -> Dict:
+        """侧面视角稳定性计算（不包含左右对称性）"""
+        trunk_stability = self._calculate_trunk_stability(keypoints_sequence)
+        head_stability = self._calculate_head_stability(keypoints_sequence)
+
+        # 侧面视角只评估躯干和头部稳定性
+        overall = (trunk_stability * 0.6 + head_stability * 0.4)
+
+        return {
+            'overall': float(overall),
+            'trunk': float(trunk_stability),
+            'head': float(head_stability),
+            'rating': self._rate_stability(overall)
+        }
+
     def _calculate_stability_improved(self, keypoints_sequence: List[Dict]) -> Dict:
-        """改进的稳定性计算"""
+        """改进的稳定性计算（正面视角使用，包含对称性和肩部晃动）"""
         trunk_stability = self._calculate_trunk_stability(keypoints_sequence)
         head_stability = self._calculate_head_stability(keypoints_sequence)
         gait_symmetry = self._calculate_gait_symmetry(keypoints_sequence)
+        shoulder_sway = self._calculate_shoulder_sway(keypoints_sequence)
 
-        overall = (trunk_stability * 0.5 + head_stability * 0.2 + gait_symmetry * 0.3)
+        # 正面视角：加入肩部晃动评估
+        overall = (trunk_stability * 0.35 + head_stability * 0.15 +
+                   gait_symmetry * 0.25 + shoulder_sway * 0.25)
 
         return {
             'overall': float(overall),
             'trunk': float(trunk_stability),
             'head': float(head_stability),
             'symmetry': float(gait_symmetry),
+            'shoulder_sway': float(shoulder_sway),
             'rating': self._rate_stability(overall)
         }
+
+    def _calculate_shoulder_sway(self, keypoints_sequence: List[Dict]) -> float:
+        """计算肩部晃动幅度（用于正面视角对称性评估）"""
+        left_shoulder_y = []
+        right_shoulder_y = []
+        shoulder_diff = []
+
+        for kp in keypoints_sequence:
+            left = kp['landmarks'][11]
+            right = kp['landmarks'][12]
+
+            if left['visibility'] > 0.5 and right['visibility'] > 0.5:
+                left_shoulder_y.append(left['y_norm'])
+                right_shoulder_y.append(right['y_norm'])
+                # 左右肩膀高度差（正常跑步时应该交替变化）
+                shoulder_diff.append(abs(left['y_norm'] - right['y_norm']))
+
+        if len(shoulder_diff) < 10:
+            return 50.0
+
+        # 肩部晃动分析
+        # 1. 左右高度差的标准差（越小越稳定）
+        diff_std = np.std(shoulder_diff) * 100
+        # 2. 左右高度差的平均值（过大说明存在不对称）
+        diff_mean = np.mean(shoulder_diff) * 100
+
+        # 评分逻辑：差值小且稳定得分高
+        score = 100 - min(diff_std * 5 + diff_mean * 3, 100)
+        return max(0, score)
 
     def _rate_stability(self, score: float) -> Dict:
         """评估稳定性"""

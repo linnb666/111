@@ -1,20 +1,10 @@
 # modules/ai_analyzer.py
 """
-重构版AI分析模块
-支持多种大模型API：
-1. OpenAI (GPT-4/GPT-4V)
-2. Anthropic (Claude)
-3. 通义千问 (Qwen)
-4. 智谱AI (GLM)
-5. 百度文心一言
-6. 本地规则引擎（无API时使用）
-
-预留多模态视频分析接口
+AI分析模块 - 精简版
+仅使用智谱AI (zai库 + glm-4.6模型)
 """
 import os
-import json
 import base64
-import requests
 from abc import ABC, abstractmethod
 from typing import Dict, Optional, List, Any
 from pathlib import Path
@@ -34,357 +24,94 @@ class BaseAIProvider(ABC):
         """分析图像（多模态）"""
         pass
 
-    def analyze_video_frames(self, frame_paths: List[str], prompt: str) -> str:
-        """分析视频帧序列（多模态）"""
-        # 默认实现：分析关键帧
-        if frame_paths:
-            return self.analyze_image(frame_paths[0], prompt)
-        return "无法分析：未提供帧"
-
-
-class OpenAIProvider(BaseAIProvider):
-    """OpenAI API提供商"""
-
-    def __init__(self, api_key: str, model: str = "gpt-4"):
-        self.api_key = api_key
-        self.model = model
-        self.base_url = "https://api.openai.com/v1"
-
-    def generate_text(self, prompt: str, system_prompt: str = None) -> str:
-        """生成文本"""
-        headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json'
-        }
-
-        messages = []
-        if system_prompt:
-            messages.append({'role': 'system', 'content': system_prompt})
-        messages.append({'role': 'user', 'content': prompt})
-
-        data = {
-            'model': self.model,
-            'messages': messages,
-            'max_tokens': 1000,
-            'temperature': 0.7
-        }
-
-        try:
-            response = requests.post(
-                f'{self.base_url}/chat/completions',
-                headers=headers,
-                json=data,
-                timeout=60
-            )
-
-            if response.status_code == 200:
-                return response.json()['choices'][0]['message']['content']
-            else:
-                return f"API请求失败: {response.status_code}"
-        except Exception as e:
-            return f"请求错误: {str(e)}"
-
-    def analyze_image(self, image_path: str, prompt: str) -> str:
-        """使用GPT-4V分析图像"""
-        if not self.model.startswith('gpt-4'):
-            return "当前模型不支持图像分析，请使用 gpt-4-vision-preview"
-
-        # 读取并编码图像
-        with open(image_path, 'rb') as f:
-            image_data = base64.b64encode(f.read()).decode('utf-8')
-
-        headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json'
-        }
-
-        data = {
-            'model': 'gpt-4-vision-preview',
-            'messages': [{
-                'role': 'user',
-                'content': [
-                    {'type': 'text', 'text': prompt},
-                    {
-                        'type': 'image_url',
-                        'image_url': {
-                            'url': f'data:image/jpeg;base64,{image_data}'
-                        }
-                    }
-                ]
-            }],
-            'max_tokens': 1000
-        }
-
-        try:
-            response = requests.post(
-                f'{self.base_url}/chat/completions',
-                headers=headers,
-                json=data,
-                timeout=60
-            )
-
-            if response.status_code == 200:
-                return response.json()['choices'][0]['message']['content']
-            else:
-                return f"API请求失败: {response.status_code}"
-        except Exception as e:
-            return f"请求错误: {str(e)}"
-
-
-class AnthropicProvider(BaseAIProvider):
-    """Anthropic Claude API提供商"""
-
-    def __init__(self, api_key: str, model: str = "claude-3-sonnet-20240229"):
-        self.api_key = api_key
-        self.model = model
-        self.base_url = "https://api.anthropic.com/v1"
-
-    def generate_text(self, prompt: str, system_prompt: str = None) -> str:
-        """生成文本"""
-        headers = {
-            'x-api-key': self.api_key,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json'
-        }
-
-        data = {
-            'model': self.model,
-            'max_tokens': 1000,
-            'messages': [{'role': 'user', 'content': prompt}]
-        }
-
-        if system_prompt:
-            data['system'] = system_prompt
-
-        try:
-            response = requests.post(
-                f'{self.base_url}/messages',
-                headers=headers,
-                json=data,
-                timeout=60
-            )
-
-            if response.status_code == 200:
-                return response.json()['content'][0]['text']
-            else:
-                return f"API请求失败: {response.status_code}"
-        except Exception as e:
-            return f"请求错误: {str(e)}"
-
-    def analyze_image(self, image_path: str, prompt: str) -> str:
-        """使用Claude分析图像"""
-        with open(image_path, 'rb') as f:
-            image_data = base64.b64encode(f.read()).decode('utf-8')
-
-        # 获取图像类型
-        ext = Path(image_path).suffix.lower()
-        media_types = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-                       '.png': 'image/png', '.gif': 'image/gif'}
-        media_type = media_types.get(ext, 'image/jpeg')
-
-        headers = {
-            'x-api-key': self.api_key,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json'
-        }
-
-        data = {
-            'model': self.model,
-            'max_tokens': 1000,
-            'messages': [{
-                'role': 'user',
-                'content': [
-                    {
-                        'type': 'image',
-                        'source': {
-                            'type': 'base64',
-                            'media_type': media_type,
-                            'data': image_data
-                        }
-                    },
-                    {'type': 'text', 'text': prompt}
-                ]
-            }]
-        }
-
-        try:
-            response = requests.post(
-                f'{self.base_url}/messages',
-                headers=headers,
-                json=data,
-                timeout=60
-            )
-
-            if response.status_code == 200:
-                return response.json()['content'][0]['text']
-            else:
-                return f"API请求失败: {response.status_code}"
-        except Exception as e:
-            return f"请求错误: {str(e)}"
-
-
-class QwenProvider(BaseAIProvider):
-    """通义千问API提供商"""
-
-    def __init__(self, api_key: str, model: str = "qwen-turbo"):
-        self.api_key = api_key
-        self.model = model
-        self.base_url = "https://dashscope.aliyuncs.com/api/v1"
-
-    def generate_text(self, prompt: str, system_prompt: str = None) -> str:
-        """生成文本"""
-        headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json'
-        }
-
-        messages = []
-        if system_prompt:
-            messages.append({'role': 'system', 'content': system_prompt})
-        messages.append({'role': 'user', 'content': prompt})
-
-        data = {
-            'model': self.model,
-            'input': {'messages': messages},
-            'parameters': {'max_tokens': 1000}
-        }
-
-        try:
-            response = requests.post(
-                f'{self.base_url}/services/aigc/text-generation/generation',
-                headers=headers,
-                json=data,
-                timeout=60
-            )
-
-            if response.status_code == 200:
-                result = response.json()
-                return result.get('output', {}).get('text', 'API返回异常')
-            else:
-                return f"API请求失败: {response.status_code}"
-        except Exception as e:
-            return f"请求错误: {str(e)}"
-
-    def analyze_image(self, image_path: str, prompt: str) -> str:
-        """使用通义千问VL分析图像"""
-        with open(image_path, 'rb') as f:
-            image_data = base64.b64encode(f.read()).decode('utf-8')
-
-        headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json'
-        }
-
-        data = {
-            'model': 'qwen-vl-plus',
-            'input': {
-                'messages': [{
-                    'role': 'user',
-                    'content': [
-                        {'image': f'data:image/jpeg;base64,{image_data}'},
-                        {'text': prompt}
-                    ]
-                }]
-            }
-        }
-
-        try:
-            response = requests.post(
-                f'{self.base_url}/services/aigc/multimodal-generation/generation',
-                headers=headers,
-                json=data,
-                timeout=60
-            )
-
-            if response.status_code == 200:
-                result = response.json()
-                return result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', 'API返回异常')
-            else:
-                return f"API请求失败: {response.status_code}"
-        except Exception as e:
-            return f"请求错误: {str(e)}"
-
 
 class ZhipuProvider(BaseAIProvider):
-    """智谱AI GLM API提供商"""
+    """智谱AI提供商 - 使用zai库"""
 
-    def __init__(self, api_key: str, model: str = "glm-4"):
+    def __init__(self, api_key: str):
         self.api_key = api_key
-        self.model = model
-        self.base_url = "https://open.bigmodel.cn/api/paas/v4"
+        self.client = None
+        self._init_client()
+
+    def _init_client(self):
+        """初始化zai客户端"""
+        try:
+            from zai import ZhipuAiClient
+            self.client = ZhipuAiClient(api_key=self.api_key)
+            print("智谱AI客户端初始化成功")
+        except ImportError:
+            print("警告: zai库未安装，请运行 pip install zai")
+            self.client = None
+        except Exception as e:
+            print(f"智谱AI客户端初始化失败: {e}")
+            self.client = None
 
     def generate_text(self, prompt: str, system_prompt: str = None) -> str:
-        """生成文本"""
-        headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json'
-        }
-
-        messages = []
-        if system_prompt:
-            messages.append({'role': 'system', 'content': system_prompt})
-        messages.append({'role': 'user', 'content': prompt})
-
-        data = {
-            'model': self.model,
-            'messages': messages,
-            'max_tokens': 2000
-        }
+        """使用glm-4.6生成文本"""
+        if not self.client:
+            return "智谱AI客户端未初始化，请检查API密钥和zai库安装"
 
         try:
-            response = requests.post(
-                f'{self.base_url}/chat/completions',
-                headers=headers,
-                json=data,
-                timeout=60
+            messages = []
+            if system_prompt:
+                messages.append({'role': 'system', 'content': system_prompt})
+            messages.append({'role': 'user', 'content': prompt})
+
+            response = self.client.chat.completions.create(
+                model="glm-4.6",
+                messages=messages,
+                temperature=0.6,
+                max_tokens=2000
             )
 
-            if response.status_code == 200:
-                return response.json()['choices'][0]['message']['content']
+            # 提取响应内容
+            if hasattr(response, 'choices') and len(response.choices) > 0:
+                return response.choices[0].message.content
+            elif isinstance(response, dict):
+                return response.get('choices', [{}])[0].get('message', {}).get('content', 'API返回异常')
             else:
-                return f"API请求失败: {response.status_code} - {response.text}"
+                return str(response)
+
         except Exception as e:
-            return f"请求错误: {str(e)}"
+            return f"智谱AI请求错误: {str(e)}"
 
     def analyze_image(self, image_path: str, prompt: str) -> str:
-        """使用GLM-4V分析图像"""
-        with open(image_path, 'rb') as f:
-            image_data = base64.b64encode(f.read()).decode('utf-8')
+        """使用glm-4v分析图像"""
+        if not self.client:
+            return "智谱AI客户端未初始化"
 
-        headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json'
-        }
+        try:
+            # 读取并编码图像
+            with open(image_path, 'rb') as f:
+                image_data = base64.b64encode(f.read()).decode('utf-8')
 
-        data = {
-            'model': 'glm-4v',
-            'messages': [{
+            messages = [{
                 'role': 'user',
                 'content': [
                     {'type': 'text', 'text': prompt},
                     {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_data}'}}
                 ]
-            }],
-            'max_tokens': 1500
-        }
+            }]
 
-        try:
-            response = requests.post(
-                f'{self.base_url}/chat/completions',
-                headers=headers,
-                json=data,
-                timeout=90
+            response = self.client.chat.completions.create(
+                model="glm-4v",
+                messages=messages,
+                temperature=0.6,
+                max_tokens=1500
             )
 
-            if response.status_code == 200:
-                return response.json()['choices'][0]['message']['content']
+            if hasattr(response, 'choices') and len(response.choices) > 0:
+                return response.choices[0].message.content
+            elif isinstance(response, dict):
+                return response.get('choices', [{}])[0].get('message', {}).get('content', 'API返回异常')
             else:
-                return f"API请求失败: {response.status_code} - {response.text}"
+                return str(response)
+
         except Exception as e:
-            return f"请求错误: {str(e)}"
+            return f"图像分析错误: {str(e)}"
 
     def analyze_video_frames(self, frame_paths: List[str], prompt: str) -> str:
-        """分析多个视频帧，支持时间段问题识别"""
+        """分析多个视频帧"""
         if not frame_paths:
             return "无法分析：未提供帧"
 
@@ -399,14 +126,14 @@ class ZhipuProvider(BaseAIProvider):
 请用简洁的语言回答。"""
 
             result = self.analyze_image(frame_path, frame_prompt)
-            if not result.startswith("API请求失败") and not result.startswith("请求错误"):
+            if not result.startswith("智谱AI") and not result.startswith("图像分析错误"):
                 frame_analyses.append(f"**帧 {i+1}**: {result}")
 
         if not frame_analyses:
             return "多模态分析失败：无法获取有效的帧分析结果"
 
         # 汇总分析
-        summary_prompt = f"""基于以下各帧的分析结果，请生成一份综合的跑步技术问题时间段分析报告：
+        summary_prompt = f"""基于以下各帧的分析结果，请生成一份综合的跑步技术问题报告：
 
 {chr(10).join(frame_analyses)}
 
@@ -419,16 +146,7 @@ class ZhipuProvider(BaseAIProvider):
         return self.generate_text(summary_prompt)
 
     def analyze_time_segments(self, keyframe_data: List[Dict], kinematic_results: Dict) -> str:
-        """
-        时间段问题分析 - 结合关键帧图像和运动学数据
-
-        Args:
-            keyframe_data: 关键帧信息列表，包含 path, time_sec, detected
-            kinematic_results: 运动学分析结果
-
-        Returns:
-            时间段问题分析报告
-        """
+        """时间段问题分析"""
         if not keyframe_data:
             return "无法进行时间段分析：未提供关键帧数据"
 
@@ -437,11 +155,17 @@ class ZhipuProvider(BaseAIProvider):
         vertical_amp = kinematic_results.get('vertical_motion', {}).get('amplitude_normalized', 0)
         stability = kinematic_results.get('stability', {}).get('overall', 0)
 
+        # 获取相位时间信息
+        gait_cycle = kinematic_results.get('gait_cycle', {})
+        phase_duration = gait_cycle.get('phase_duration_ms', {})
+
         context = f"""
 运动学数据参考：
 - 步频: {cadence:.1f} 步/分
 - 垂直振幅: {vertical_amp:.2f}% 躯干长度
 - 稳定性评分: {stability:.1f}/100
+- 触地时间: {phase_duration.get('ground_contact', 0):.1f}ms
+- 腾空时间: {phase_duration.get('flight', 0):.1f}ms
 """
 
         # 分析每个关键帧
@@ -467,7 +191,7 @@ class ZhipuProvider(BaseAIProvider):
 
             try:
                 result = self.analyze_image(kf['path'], frame_prompt)
-                if not result.startswith("API请求失败") and not result.startswith("请求错误"):
+                if not result.startswith("智谱AI") and not result.startswith("图像分析错误"):
                     segment_analyses.append(f"**{kf['time_sec']:.2f}秒**: {result}")
             except Exception as e:
                 segment_analyses.append(f"时间 {kf['time_sec']:.2f}s: 分析失败 - {str(e)}")
@@ -510,19 +234,17 @@ class LocalRuleEngine(BaseAIProvider):
 
     def analyze_image(self, image_path: str, prompt: str) -> str:
         """本地无法分析图像"""
-        return "本地模式不支持图像分析，请配置AI API"
+        return "本地模式不支持图像分析，请配置智谱AI API"
 
     def generate_analysis_report(self, results: Dict) -> str:
-        """基于规则生成分析报告 - 优化排版"""
+        """基于规则生成分析报告"""
         quality = results.get('quality_evaluation', {})
         kinematic = results.get('kinematic_analysis', {})
         view_angle = results.get('view_angle', 'side')
 
-        # 提取详细分析
-        detailed = quality.get('detailed_analysis', {})
         score = quality.get('total_score', 0)
 
-        # 构建报告 - 使用Markdown格式
+        # 构建报告
         report = f"""## 跑步技术分析报告
 
 ### 一、总体评价
@@ -544,14 +266,13 @@ class LocalRuleEngine(BaseAIProvider):
         else:
             report += "> 您的跑步技术有较大**提升空间**，建议系统训练。\n\n"
 
-        # 各维度表现
+        # 各维度表现（移除节奏一致性）
         report += "### 二、各维度表现\n\n"
         dims = quality.get('dimension_scores', {})
         dim_names = {
             'stability': ('动作稳定性', '身体控制和核心力量'),
             'efficiency': ('跑步效率', '能量利用和步态经济性'),
-            'form': ('跑姿标准度', '关节角度和身体姿态'),
-            'rhythm': ('节奏一致性', '步频稳定性和节奏控制')
+            'form': ('跑姿标准度', '关节角度和身体姿态')
         }
 
         report += "| 维度 | 得分 | 等级 | 说明 |\n"
@@ -581,7 +302,6 @@ class LocalRuleEngine(BaseAIProvider):
             if rating:
                 report += f"- 评估: {rating.get('description', '')}\n"
 
-            # 步频建议
             if cadence >= 180:
                 report += f"- 分析: 步频处于理想范围，有助于减少触地时间和受伤风险\n"
             elif cadence >= 160:
@@ -602,7 +322,6 @@ class LocalRuleEngine(BaseAIProvider):
                 report += f"- 等级: {rating.get('level', '未知')}\n"
                 report += f"- 评估: {rating.get('description', '')}\n"
 
-            # 振幅解读
             if 3 <= amplitude <= 6:
                 report += f"- 分析: 垂直振幅非常理想，能量利用效率高\n"
             elif amplitude < 3:
@@ -613,9 +332,23 @@ class LocalRuleEngine(BaseAIProvider):
                 report += f"- 分析: 振幅偏大，建议改善跑姿减少能量浪费\n"
             report += "\n"
 
+        # 步态周期时间（毫秒）
+        gait_cycle = kinematic.get('gait_cycle', {})
+        if gait_cycle and 'phase_duration_ms' in gait_cycle:
+            phase_ms = gait_cycle['phase_duration_ms']
+            report += "**步态周期时间**\n\n"
+            report += "| 阶段 | 平均时长 |\n"
+            report += "|------|----------|\n"
+            report += f"| 触地期 | {phase_ms.get('ground_contact', 0):.1f} ms |\n"
+            report += f"| 腾空期 | {phase_ms.get('flight', 0):.1f} ms |\n"
+            report += f"| 过渡期 | {phase_ms.get('transition', 0):.1f} ms |\n"
+            if gait_cycle.get('avg_cycle_duration_ms', 0) > 0:
+                report += f"| 完整周期 | {gait_cycle.get('avg_cycle_duration_ms', 0):.1f} ms |\n"
+            report += "\n"
+
         # 膝关节角度（侧面视角）
         angles = kinematic.get('angles', {})
-        if 'phase_analysis' in angles and view_angle in ['side', 'mixed']:
+        if 'phase_analysis' in angles and view_angle == 'side':
             phase_analysis = angles['phase_analysis']
 
             report += f"**膝关节角度（分阶段）**\n\n"
@@ -643,35 +376,43 @@ class LocalRuleEngine(BaseAIProvider):
             report += f"- 综合稳定性: {stability.get('overall', 0):.1f}/100\n"
             report += f"- 躯干稳定: {stability.get('trunk', 0):.1f}/100\n"
             report += f"- 头部稳定: {stability.get('head', 0):.1f}/100\n"
-            report += f"- 左右对称: {stability.get('symmetry', 0):.1f}/100\n\n"
+            # 只在正面视角显示对称性和肩部晃动
+            if view_angle == 'front' and 'symmetry' in stability:
+                report += f"- 左右对称: {stability.get('symmetry', 0):.1f}/100\n"
+                if 'shoulder_sway' in stability:
+                    report += f"- 肩部稳定: {stability.get('shoulder_sway', 0):.1f}/100\n"
+            report += "\n"
 
         # 优势分析
         strengths = quality.get('strengths', [])
-        if strengths:
+        if strengths and strengths != ['暂无突出优势']:
             report += "### 四、技术优势\n\n"
             for strength in strengths:
-                report += f"✅ {strength}\n\n"
+                report += f"- {strength}\n"
+            report += "\n"
 
         # 薄弱项
         weaknesses = quality.get('weaknesses', [])
-        if weaknesses:
+        if weaknesses and weaknesses != ['无明显薄弱项']:
             report += "### 五、待改进项\n\n"
             for weakness in weaknesses:
-                report += f"⚠️ {weakness}\n\n"
+                report += f"- {weakness}\n"
+            report += "\n"
 
         # 改进建议
         suggestions = quality.get('suggestions', [])
         if suggestions:
             report += "### 六、改进建议\n\n"
             for i, suggestion in enumerate(suggestions, 1):
-                report += f"{i}. {suggestion}\n\n"
+                report += f"{i}. {suggestion}\n"
+            report += "\n"
 
         # 总结
         report += "### 七、总结\n\n"
         if score >= 85:
-            report += "您的跑步技术非常出色！动作协调、节奏稳定、能量利用高效。继续保持当前状态，可以尝试挑战更高配速或更长距离。\n"
+            report += "您的跑步技术非常出色！动作协调、能量利用高效。继续保持当前状态，可以尝试挑战更高配速或更长距离。\n"
         elif score >= 70:
-            report += "整体表现良好，具备较好的跑步基础。针对上述建议进行专项练习，您的跑步技术会有明显提升。建议每周进行1-2次技术训练。\n"
+            report += "整体表现良好，具备较好的跑步基础。针对上述建议进行专项练习，您的跑步技术会有明显提升。\n"
         elif score >= 55:
             report += "基础动作已经掌握，但存在一些可以优化的环节。建议从步频控制和核心稳定性入手，循序渐进地改善跑姿。\n"
         else:
@@ -685,9 +426,7 @@ class LocalRuleEngine(BaseAIProvider):
         """获取视角中文名称"""
         names = {
             'side': '侧面视角',
-            'front': '正面视角',
-            'back': '背面视角',
-            'mixed': '混合视角'
+            'front': '正面视角'
         }
         return names.get(view, view)
 
@@ -695,36 +434,20 @@ class LocalRuleEngine(BaseAIProvider):
 class AIAnalyzer:
     """AI分析器主类"""
 
-    # 支持的提供商
-    PROVIDERS = {
-        'openai': OpenAIProvider,
-        'anthropic': AnthropicProvider,
-        'qwen': QwenProvider,
-        'zhipu': ZhipuProvider,
-        'local': LocalRuleEngine,
-    }
-
-    def __init__(self, provider: str = None, api_key: str = None):
+    def __init__(self, api_key: str = None):
         """
         初始化AI分析器
 
         Args:
-            provider: AI提供商 ('openai', 'anthropic', 'qwen', 'zhipu', 'local')
-            api_key: API密钥
+            api_key: 智谱AI API密钥
         """
-        # 使用配置或参数
         self.enabled = AI_CONFIG.get('enabled', False)
-        provider = provider or AI_CONFIG.get('provider', 'local')
         api_key = api_key or AI_CONFIG.get('api_key', '')
 
-        # 初始化提供商
-        if provider in self.PROVIDERS:
-            if provider == 'local' or not api_key:
-                self.provider = LocalRuleEngine()
-                self.provider_name = 'local'
-            else:
-                self.provider = self.PROVIDERS[provider](api_key)
-                self.provider_name = provider
+        # 初始化智谱AI提供商
+        if api_key:
+            self.provider = ZhipuProvider(api_key)
+            self.provider_name = 'zhipu'
         else:
             self.provider = LocalRuleEngine()
             self.provider_name = 'local'
@@ -746,7 +469,7 @@ class AIAnalyzer:
         if self.provider_name == 'local':
             return self.local_engine.generate_analysis_report(analysis_results)
 
-        # 尝试使用AI API
+        # 尝试使用智谱AI
         try:
             prompt = self._build_analysis_prompt(analysis_results)
             system_prompt = self._get_system_prompt()
@@ -754,10 +477,10 @@ class AIAnalyzer:
             response = self.provider.generate_text(prompt, system_prompt)
 
             # 检查响应是否有效
-            if response and not response.startswith('API请求失败') and not response.startswith('请求错误'):
+            if response and not response.startswith('智谱AI') and not response.startswith('请求错误'):
                 return response
             else:
-                print(f"AI API响应异常: {response}")
+                print(f"智谱AI响应异常: {response}")
                 return self.local_engine.generate_analysis_report(analysis_results)
 
         except Exception as e:
@@ -765,17 +488,9 @@ class AIAnalyzer:
             return self.local_engine.generate_analysis_report(analysis_results)
 
     def analyze_pose_image(self, image_path: str) -> str:
-        """
-        分析姿态图像（多模态）
-
-        Args:
-            image_path: 图像路径
-
-        Returns:
-            AI分析结果
-        """
+        """分析姿态图像"""
         if self.provider_name == 'local':
-            return "本地模式不支持图像分析，请配置AI API"
+            return "本地模式不支持图像分析，请配置智谱AI API"
 
         prompt = """请分析这张跑步姿态图像：
 1. 描述跑者的整体姿态
@@ -791,17 +506,9 @@ class AIAnalyzer:
             return f"图像分析失败: {str(e)}"
 
     def analyze_video_sequence(self, frame_paths: List[str]) -> str:
-        """
-        分析视频帧序列（多模态）
-
-        Args:
-            frame_paths: 关键帧路径列表
-
-        Returns:
-            AI分析结果
-        """
+        """分析视频帧序列"""
         if self.provider_name == 'local':
-            return "本地模式不支持视频分析，请配置AI API"
+            return "本地模式不支持视频分析，请配置智谱AI API"
 
         prompt = """请分析这些跑步视频关键帧：
 1. 描述跑者的整体技术水平
@@ -816,27 +523,14 @@ class AIAnalyzer:
             return f"视频分析失败: {str(e)}"
 
     def analyze_time_segments(self, keyframe_data: List[Dict], kinematic_results: Dict) -> str:
-        """
-        多模态时间段问题分析
-
-        Args:
-            keyframe_data: 关键帧信息列表
-            kinematic_results: 运动学分析结果
-
-        Returns:
-            时间段问题分析报告
-        """
+        """多模态时间段问题分析"""
         if self.provider_name == 'local':
             return self._local_time_segment_analysis(keyframe_data, kinematic_results)
 
-        # 检查是否支持时间段分析
-        if hasattr(self.provider, 'analyze_time_segments'):
-            try:
-                return self.provider.analyze_time_segments(keyframe_data, kinematic_results)
-            except Exception as e:
-                print(f"多模态时间段分析失败: {e}")
-                return self._local_time_segment_analysis(keyframe_data, kinematic_results)
-        else:
+        try:
+            return self.provider.analyze_time_segments(keyframe_data, kinematic_results)
+        except Exception as e:
+            print(f"多模态时间段分析失败: {e}")
             return self._local_time_segment_analysis(keyframe_data, kinematic_results)
 
     def _local_time_segment_analysis(self, keyframe_data: List[Dict], kinematic_results: Dict) -> str:
@@ -844,7 +538,6 @@ class AIAnalyzer:
         if not keyframe_data:
             return "无法进行时间段分析：未提供关键帧数据"
 
-        # 提取运动学数据
         cadence = kinematic_results.get('cadence', {}).get('cadence', 0)
         vertical_amp = kinematic_results.get('vertical_motion', {}).get('amplitude_normalized', 0)
         stability = kinematic_results.get('stability', {}).get('overall', 0)
@@ -854,7 +547,6 @@ class AIAnalyzer:
         angles = kinematic_results.get('angles', {})
         phase_analysis = angles.get('phase_analysis', {})
 
-        # 基于规则识别问题
         if cadence < 160:
             problem_segments.append("全程: 步频偏低，建议提高节奏")
         elif cadence > 210:
@@ -866,17 +558,15 @@ class AIAnalyzer:
         if stability < 60:
             problem_segments.append("全程: 动作稳定性不足，需加强核心训练")
 
-        # 检查膝关节角度
         gc = phase_analysis.get('ground_contact', {})
         if gc.get('mean', 180) < 145:
-            problem_segments.append("触地阶段: 膝关节弯曲过大，可能影响推进效率")
+            problem_segments.append("触地阶段: 膝关节弯曲过大")
 
         fl = phase_analysis.get('flight', {})
         if fl.get('mean', 90) > 140:
-            problem_segments.append("腾空阶段: 腿部后摆不足，影响步幅")
+            problem_segments.append("腾空阶段: 腿部后摆不足")
 
-        # 构建报告
-        report = "## 时间段问题分析（基于规则引擎）\n\n"
+        report = "## 时间段问题分析\n\n"
 
         if problem_segments:
             report += "### 识别到的问题\n\n"
@@ -886,13 +576,12 @@ class AIAnalyzer:
         else:
             report += "### 分析结果\n\n未发现明显技术问题，整体表现良好。\n\n"
 
-        # 添加关键帧时间点
         report += "### 关键帧时间点\n\n"
         for kf in keyframe_data:
-            status = "✓ 姿态正常" if kf.get('detected', False) else "⚠ 未检测到姿态"
+            status = "姿态正常" if kf.get('detected', False) else "未检测到姿态"
             report += f"- {kf['time_sec']:.2f}s: {status}\n"
 
-        report += "\n*注：如需更精确的多模态分析，请启用智谱AI API*\n"
+        report += "\n*如需更精确的多模态分析，请启用智谱AI*\n"
 
         return report
 
@@ -910,7 +599,6 @@ class AIAnalyzer:
 - 动作稳定性：{quality.get('dimension_scores', {}).get('stability', 0):.1f}/100
 - 跑步效率：{quality.get('dimension_scores', {}).get('efficiency', 0):.1f}/100
 - 跑姿标准度：{quality.get('dimension_scores', {}).get('form', 0):.1f}/100
-- 节奏一致性：{quality.get('dimension_scores', {}).get('rhythm', 0):.1f}/100
 
 【运动学指标】
 - 步频：{kinematic.get('cadence', {}).get('cadence', 0):.0f} 步/分
@@ -927,46 +615,34 @@ class AIAnalyzer:
 4. 具体可操作的训练建议（3-5条）
 5. 鼓励性总结
 
-要求：
-- 语言专业但易懂
-- 建议具体可操作
-- 态度积极正面
-"""
+要求：语言专业但易懂，建议具体可操作，态度积极正面。"""
+
         return prompt
 
     def _get_system_prompt(self) -> str:
         """获取系统提示词"""
-        return """你是一位经验丰富的跑步教练和运动科学专家。你擅长：
-- 分析跑步技术和生物力学
-- 识别跑姿问题和改进空间
-- 提供个性化的训练建议
-- 用通俗易懂的语言解释专业概念
-
-请根据提供的数据，给出专业、友好、有建设性的分析报告。"""
+        return """你是一位经验丰富的跑步教练和运动科学专家。请根据提供的数据，给出专业、友好、有建设性的分析报告。"""
 
 
-# 工厂函数
-def create_ai_analyzer(provider: str = None, api_key: str = None) -> AIAnalyzer:
+def create_ai_analyzer(api_key: str = None) -> AIAnalyzer:
     """
     创建AI分析器
 
     Args:
-        provider: 提供商名称
-        api_key: API密钥
+        api_key: 智谱AI API密钥
 
     Returns:
         AIAnalyzer实例
     """
-    return AIAnalyzer(provider, api_key)
+    return AIAnalyzer(api_key)
 
 
 # 模块测试
 if __name__ == "__main__":
     print("=" * 60)
-    print("测试AI分析模块")
+    print("测试AI分析模块（智谱AI版）")
     print("=" * 60)
 
-    # 模拟分析结果
     mock_results = {
         'quality_evaluation': {
             'total_score': 75.5,
@@ -974,33 +650,30 @@ if __name__ == "__main__":
             'dimension_scores': {
                 'stability': 78,
                 'efficiency': 72,
-                'form': 76,
-                'rhythm': 75
-            },
-            'detailed_analysis': {
-                'cadence': {'value': '175 步/分', 'assessment': '步频良好'},
-                'vertical_amplitude': {'value': '7.5%', 'assessment': '振幅在可接受范围'},
-                'knee_angles': {
-                    'ground_contact': '165°',
-                    'max_flexion': '105°',
-                    'assessment': '膝关节角度正常'
-                }
+                'form': 76
             },
             'strengths': ['动作稳定性'],
             'weaknesses': [],
             'suggestions': ['可适当提高步频', '保持当前良好状态']
         },
         'kinematic_analysis': {
-            'cadence': {'cadence': 175},
+            'cadence': {'cadence': 175, 'step_count': 15, 'duration': 5.0},
             'vertical_motion': {'amplitude_normalized': 7.5},
-            'stability': {'overall': 78}
+            'stability': {'overall': 78, 'trunk': 82, 'head': 75},
+            'gait_cycle': {
+                'phase_duration_ms': {
+                    'ground_contact': 180.5,
+                    'flight': 120.3,
+                    'transition': 45.2
+                },
+                'avg_cycle_duration_ms': 345.0
+            }
         }
     }
 
-    # 测试本地规则引擎
     print("\n测试本地规则引擎...")
-    analyzer = AIAnalyzer(provider='local')
-    report = analyzer.generate_analysis_report(mock_results)
+    analyzer = AIAnalyzer()
+    report = analyzer.local_engine.generate_analysis_report(mock_results)
     print(report)
 
-    print("\n✅ AI分析模块测试完成!")
+    print("\n智谱AI分析模块测试完成!")
