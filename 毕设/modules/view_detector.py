@@ -362,6 +362,40 @@ class AdaptiveAnalyzer:
 
     def __init__(self):
         self.view_detector = ViewAngleDetector()
+        self._kinematic_analyzer = None
+
+    @property
+    def kinematic_analyzer(self):
+        """延迟加载 KinematicAnalyzer"""
+        if self._kinematic_analyzer is None:
+            from modules.kinematic_analyzer import KinematicAnalyzer
+            self._kinematic_analyzer = KinematicAnalyzer()
+        return self._kinematic_analyzer
+
+    def analyze(self, keypoints_sequence: List[Dict],
+                fps: float,
+                view_angle: str = 'side') -> Dict:
+        """
+        执行运动学分析
+
+        Args:
+            keypoints_sequence: 关键点序列
+            fps: 帧率
+            view_angle: 视角类型 ('side', 'front', 'back', 'mixed')
+
+        Returns:
+            分析结果
+        """
+        # 使用 KinematicAnalyzer 进行分析
+        results = self.kinematic_analyzer.analyze_sequence(
+            keypoints_sequence, fps, view_angle=view_angle
+        )
+
+        # 添加分析策略信息
+        results['view_angle'] = view_angle
+        results['analysis_strategy'] = self.view_detector.get_analysis_strategy(view_angle)
+
+        return results
 
     def analyze_with_auto_view(self, keypoints_sequence: List[Dict],
                                 fps: float,
