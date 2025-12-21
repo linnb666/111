@@ -154,7 +154,7 @@ def analyze_video(video_path: str, view_override: str = None):
         else:
             view_detector = ViewAngleDetector()
             view_result = view_detector.detect_view_angle(keypoints_sequence)
-            detected_view = view_result['view_angle']
+            detected_view = view_result['primary_view']  # 修复: 使用正确的键名
             view_confidence = view_result['confidence']
 
             # 显示视角检测结果
