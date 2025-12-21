@@ -159,9 +159,13 @@ CADENCE_THRESHOLDS = {
 
 # ================== AI分析配置 ==================
 
+# 智谱AI API密钥（用户提供）
+ZHIPU_API_KEY = os.getenv('ZHIPU_API_KEY', '79a902c70ed7420094d2e49d24d48128.OFDigksLwuslKmlp')
+
 AI_CONFIG = {
-    'enabled': False,  # 是否启用AI分析
-    'default_provider': 'local',  # 默认使用本地规则引擎
+    'enabled': True,  # 启用AI分析
+    'provider': 'zhipu',  # 默认使用智谱AI
+    'api_key': ZHIPU_API_KEY,
 
     # 提供商配置
     'providers': {
@@ -191,24 +195,27 @@ AI_CONFIG = {
             'temperature': 0.7
         },
         'zhipu': {
-            'enabled': False,
-            'api_key': os.getenv('ZHIPU_API_KEY', ''),
+            'enabled': True,
+            'api_key': ZHIPU_API_KEY,
+            'api_base': 'https://open.bigmodel.cn/api/paas/v4',
             'model': 'glm-4',
             'vision_model': 'glm-4v',
-            'max_tokens': 1000,
+            'max_tokens': 2000,
             'temperature': 0.7
         },
         'local': {
-            'enabled': True,  # 本地规则引擎始终可用
+            'enabled': True,  # 本地规则引擎始终可用作后备
             'model': 'rule_engine'
         }
     },
 
     # 多模态分析配置
     'multimodal': {
-        'enabled': False,
+        'enabled': True,
         'frame_sample_rate': 10,  # 每10帧采样一帧进行图像分析
-        'max_frames': 5           # 最多分析5帧
+        'max_frames': 6,          # 最多分析6帧
+        'keyframe_mode': 'uniform',  # 关键帧采样模式: 'uniform', 'phase', 'quality'
+        'time_segment_analysis': True  # 启用时间段问题分析
     }
 }
 

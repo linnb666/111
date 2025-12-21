@@ -163,13 +163,32 @@ def analyze_video(video_path: str, view_override: str = None):
             view_col2.metric("置信度", f"{view_confidence*100:.1f}%")
             view_col3.metric("分析策略", get_strategy_name(detected_view))
 
-        # 生成姿态视频
-        status_text.text("3️⃣ 生成姿态识别视频...")
+        # 生成姿态识别内容
+        status_text.text("3️⃣ 生成姿态识别视频与关键帧...")
         progress_bar.progress(40)
-        pose_video_path = generate_pose_video(frames, keypoints_sequence, fps, estimator)
 
-        st.subheader("🦴 姿态识别视频")
-        st.video(pose_video_path)
+        # 尝试生成视频
+        try:
+            pose_video_path = generate_pose_video(frames, keypoints_sequence, fps, estimator)
+            st.subheader("🦴 姿态识别视频")
+            st.video(pose_video_path)
+        except Exception as video_err:
+            st.warning(f"视频生成失败: {video_err}，将显示关键帧图像")
+
+        # 提取并显示关键帧（无论视频是否成功都显示）
+        keyframe_data = extract_keyframes_with_poses(frames, keypoints_sequence, fps, estimator, num_keyframes=6)
+        if keyframe_data:
+            st.subheader("🖼️ 关键帧姿态分析")
+
+            # 每行显示3张关键帧
+            for row_start in range(0, len(keyframe_data), 3):
+                cols = st.columns(3)
+                for i, kf in enumerate(keyframe_data[row_start:row_start+3]):
+                    with cols[i]:
+                        st.image(kf['path'], caption=f"时间: {kf['time_sec']:.2f}s",
+                                 use_container_width=True)
+                        if not kf['detected']:
+                            st.caption("⚠️ 未检测到姿态")
 
         # 4. 运动学分析（使用自适应分析器）
         status_text.text("4️⃣ 运动学分析中...")
@@ -198,7 +217,7 @@ def analyze_video(video_path: str, view_override: str = None):
 
         # 7. AI文本生成
         status_text.text("7️⃣ AI文本分析中...")
-        progress_bar.progress(95)
+        progress_bar.progress(90)
         results_for_ai = {
             'quality_evaluation': quality_results,
             'kinematic_analysis': kinematic_results,
@@ -207,13 +226,26 @@ def analyze_video(video_path: str, view_override: str = None):
         }
         ai_text = components['ai'].generate_analysis_report(results_for_ai)
 
+        # 8. 多模态时间段分析（如果有关键帧数据）
+        time_segment_analysis = ""
+        if keyframe_data and len(keyframe_data) > 0:
+            status_text.text("8️⃣ 多模态时间段分析中...")
+            progress_bar.progress(95)
+            try:
+                time_segment_analysis = components['ai'].analyze_time_segments(
+                    keyframe_data, kinematic_results
+                )
+            except Exception as e:
+                st.warning(f"时间段分析失败: {e}")
+                time_segment_analysis = ""
+
         # 完成
         progress_bar.progress(100)
         status_text.text("✅ 分析完成!")
 
         # 显示结果
         st.markdown("---")
-        display_results(quality_results, kinematic_results, temporal_results, ai_text, detected_view)
+        display_results(quality_results, kinematic_results, temporal_results, ai_text, detected_view, time_segment_analysis)
 
         # 保存到数据库
         complete_results = {
@@ -261,41 +293,112 @@ def get_strategy_name(view: str) -> str:
 
 def generate_pose_video(frames, keypoints_sequence, fps, estimator):
     """将姿态骨架绘制到每一帧并生成视频"""
-    from pathlib import Path
+    import tempfile
+    import os
 
+    # 使用临时文件避免路径问题
     output_dir = Path("output/videos")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    output_path = output_dir / "pose_visualization.mp4"
+    # 使用唯一的文件名
+    import time
+    timestamp = int(time.time())
+    output_path = output_dir / f"pose_visualization_{timestamp}.mp4"
 
-    h, w, _ = frames[0].shape
-    fps = int(round(fps))
+    h, w = frames[0].shape[:2]
+    fps_int = max(1, int(round(fps)))
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(
-        str(output_path),
-        fourcc,
-        fps,
-        (w, h)
-    )
+    # 尝试多种编码格式
+    codecs = [
+        ('avc1', '.mp4'),  # H.264 - 最兼容
+        ('mp4v', '.mp4'),  # MPEG-4
+        ('XVID', '.avi'),  # XVID
+    ]
 
-    if not writer.isOpened():
-        raise RuntimeError("❌ VideoWriter 打开失败，无法生成视频")
+    writer = None
+    final_path = None
+
+    for codec, ext in codecs:
+        test_path = output_dir / f"pose_visualization_{timestamp}{ext}"
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        writer = cv2.VideoWriter(
+            str(test_path),
+            fourcc,
+            fps_int,
+            (w, h)
+        )
+        if writer.isOpened():
+            final_path = test_path
+            break
+        writer.release()
+
+    if not writer or not writer.isOpened():
+        raise RuntimeError("❌ VideoWriter 打开失败，尝试了多种编码格式")
 
     for frame, kp in zip(frames, keypoints_sequence):
         if kp.get("detected", False):
             vis_frame = estimator.visualize_pose(frame, kp)
         else:
-            vis_frame = frame
+            vis_frame = frame.copy()
 
         writer.write(vis_frame)
 
     writer.release()
 
-    return str(output_path)
+    return str(final_path)
 
 
-def display_results(quality, kinematic, temporal, ai_text, view_angle='side'):
+def extract_keyframes_with_poses(frames, keypoints_sequence, fps, estimator, num_keyframes=6):
+    """提取关键帧并绘制姿态骨架"""
+    import time
+
+    output_dir = Path("output/keyframes")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    total_frames = len(frames)
+    if total_frames == 0:
+        return []
+
+    # 计算关键帧索引（均匀分布）
+    if total_frames <= num_keyframes:
+        indices = list(range(total_frames))
+    else:
+        indices = [int(i * (total_frames - 1) / (num_keyframes - 1)) for i in range(num_keyframes)]
+
+    keyframe_paths = []
+    timestamp = int(time.time())
+
+    for i, idx in enumerate(indices):
+        frame = frames[idx]
+        kp = keypoints_sequence[idx]
+
+        if kp.get("detected", False):
+            vis_frame = estimator.visualize_pose(frame.copy(), kp)
+        else:
+            vis_frame = frame.copy()
+            # 在未检测到姿态的帧上添加提示
+            cv2.putText(vis_frame, "No pose detected", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+        # 添加时间戳
+        time_sec = idx / fps
+        cv2.putText(vis_frame, f"Time: {time_sec:.2f}s", (10, vis_frame.shape[0] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        # 保存关键帧
+        keyframe_path = output_dir / f"keyframe_{timestamp}_{i}.jpg"
+        cv2.imwrite(str(keyframe_path), vis_frame)
+        keyframe_paths.append({
+            'path': str(keyframe_path),
+            'frame_idx': idx,
+            'time_sec': time_sec,
+            'detected': kp.get("detected", False)
+        })
+
+    return keyframe_paths
+
+
+def display_results(quality, kinematic, temporal, ai_text, view_angle='side', time_segment_analysis=''):
     """显示分析结果"""
     st.header("📊 分析结果")
 
@@ -332,27 +435,35 @@ def display_results(quality, kinematic, temporal, ai_text, view_angle='side'):
     st.subheader("🔬 运动学指标")
 
     # 基础指标（所有视角都显示）
+    cadence_data = kinematic.get('cadence', {})
     col1, col2, col3 = st.columns(3)
-    col1.metric("步频", f"{kinematic.get('cadence', {}).get('cadence', 0):.1f} 步/分")
-    col2.metric("步数", f"{kinematic.get('cadence', {}).get('step_count', 0)}")
+    col1.metric("步频", f"{cadence_data.get('cadence', 0):.1f} 步/分",
+                delta=cadence_data.get('rating', {}).get('description', ''))
+    col2.metric("检测步数", f"{cadence_data.get('step_count', 0)} 步",
+                help=f"视频时长 {cadence_data.get('duration', 0):.1f} 秒")
 
     # 垂直振幅 - 使用归一化值
     vertical_motion = kinematic.get('vertical_motion', {})
-    if 'normalized_amplitude' in vertical_motion:
-        amplitude_pct = vertical_motion['normalized_amplitude'] * 100
+    if 'amplitude_normalized' in vertical_motion:
+        amplitude_pct = vertical_motion['amplitude_normalized']
+        rating_info = vertical_motion.get('amplitude_rating', {})
         col3.metric("垂直振幅", f"{amplitude_pct:.1f}% 躯干",
+                    delta=rating_info.get('description', ''),
                     help="相对于躯干长度的垂直振幅百分比")
+    elif vertical_motion.get('amplitude', 0) > 0:
+        col3.metric("垂直振幅", f"{vertical_motion['amplitude']:.4f}",
+                    help="归一化坐标下的振幅")
     else:
-        col3.metric("垂直振幅", f"{vertical_motion.get('amplitude', 0):.1f} px")
+        col3.metric("垂直振幅", "数据不足")
 
     # 膝关节角度分析（侧面视角重点）
     if view_angle in ['side', 'mixed']:
         angles = kinematic.get('angles', {})
-        knee_angles = angles.get('knee', {})
 
-        if 'phase_analysis' in knee_angles:
+        # phase_analysis 直接在 angles 下，不是在 angles['knee'] 下
+        if 'phase_analysis' in angles:
             st.subheader("🦵 膝关节角度分析（分阶段）")
-            phase_analysis = knee_angles['phase_analysis']
+            phase_analysis = angles['phase_analysis']
 
             phase_cols = st.columns(3)
 
@@ -416,6 +527,11 @@ def display_results(quality, kinematic, temporal, ai_text, view_angle='side'):
     # AI分析文本
     st.subheader("📝 AI深度分析")
     st.markdown(ai_text)
+
+    # 时间段问题分析（多模态）
+    if time_segment_analysis:
+        st.subheader("🔍 多模态时间段分析")
+        st.markdown(time_segment_analysis)
 
 
 def history_page():

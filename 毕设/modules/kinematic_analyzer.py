@@ -784,25 +784,36 @@ class KinematicAnalyzer:
 
         # 加权平均（脚踝方法权重最高）
         cadences = [cadence1, cadence2, cadence3]
+        step_counts = [step_count1, step_count2, step_count3]
         weights = [0.2, 0.6, 0.2]
 
-        valid_cadences = [(c, w) for c, w in zip(cadences, weights) if c > 0]
-        if valid_cadences:
-            weighted_cadence = sum(c * w for c, w in valid_cadences) / sum(w for _, w in valid_cadences)
-            avg_step_count = int(np.mean([s for s in [step_count1, step_count2, step_count3] if s > 0]))
+        valid_data = [(c, s, w) for c, s, w in zip(cadences, step_counts, weights) if c > 0 and s > 0]
+        if valid_data:
+            total_weight = sum(w for _, _, w in valid_data)
+            weighted_cadence = sum(c * w for c, _, w in valid_data) / total_weight
+            # 步数也使用加权平均，保持与步频一致
+            weighted_step_count = sum(s * w for _, s, w in valid_data) / total_weight
+            avg_step_count = int(round(weighted_step_count))
         else:
             weighted_cadence = 0
             avg_step_count = 0
 
         duration = len(keypoints_sequence) / fps
 
+        # 计算预期步数（基于加权步频）用于验证
+        expected_steps = weighted_cadence * duration / 60 if weighted_cadence > 0 else 0
+
         return {
             'cadence': float(weighted_cadence),
             'step_count': avg_step_count,
             'duration': float(duration),
+            'expected_steps': float(expected_steps),  # 新增：理论步数（用于解释）
             'cadence_knee': float(cadence1),
             'cadence_ankle': float(cadence2),
             'cadence_hip': float(cadence3),
+            'step_count_knee': step_count1,
+            'step_count_ankle': step_count2,
+            'step_count_hip': step_count3,
             'confidence': self._calculate_cadence_confidence([cadence1, cadence2, cadence3]),
             'rating': self._rate_cadence(weighted_cadence),
         }
