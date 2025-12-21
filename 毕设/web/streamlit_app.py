@@ -186,7 +186,7 @@ def analyze_video(video_path: str, view_override: str = None):
                 for i, kf in enumerate(keyframe_data[row_start:row_start+3]):
                     with cols[i]:
                         st.image(kf['path'], caption=f"时间: {kf['time_sec']:.2f}s",
-                                 use_container_width=True)
+                                 use_column_width=True)  # 兼容旧版Streamlit
                         if not kf['detected']:
                             st.caption("⚠️ 未检测到姿态")
 
