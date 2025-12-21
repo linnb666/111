@@ -291,27 +291,46 @@ class TemporalModelAnalyzer:
         }
 
     def _prepare_input(self, keypoints_sequence: List[Dict]) -> Optional[torch.Tensor]:
-        """准备模型输入"""
+        """准备模型输入（优化版：增加数据多样性）"""
         valid_frames = [kp for kp in keypoints_sequence if kp.get('detected', False)]
 
         if len(valid_frames) < MODEL_CONFIG['sequence_length']:
             print(f"⚠️ 有效帧数 {len(valid_frames)} < 最小序列长度 {MODEL_CONFIG['sequence_length']}")
             return None
 
-        # 提取关键点坐标（归一化）
+        # 使用更多帧进行分析（如果可用）
+        use_frames = min(len(valid_frames), MODEL_CONFIG['sequence_length'] * 2)
+
+        # 提取关键点坐标（归一化）+ 添加速度特征
         features = []
-        for kp in valid_frames[:MODEL_CONFIG['sequence_length']]:
+        prev_frame = None
+        for i, kp in enumerate(valid_frames[:use_frames]):
             frame_features = []
-            for landmark in kp['landmarks']:
+            for j, landmark in enumerate(kp['landmarks']):
                 frame_features.extend([landmark['x_norm'], landmark['y_norm']])
-            features.append(frame_features)
+
+                # 添加速度特征（如果有前一帧）
+                if prev_frame is not None:
+                    dx = landmark['x_norm'] - prev_frame['landmarks'][j]['x_norm']
+                    dy = landmark['y_norm'] - prev_frame['landmarks'][j]['y_norm']
+                    frame_features.extend([dx * 10, dy * 10])  # 放大速度特征
+
+            # 只在前30帧使用完整特征
+            if i < MODEL_CONFIG['sequence_length']:
+                features.append(frame_features[:MODEL_CONFIG['input_dim']])
+
+            prev_frame = kp
+
+        # 确保有足够的帧
+        while len(features) < MODEL_CONFIG['sequence_length']:
+            features.append(features[-1] if features else [0] * MODEL_CONFIG['input_dim'])
 
         # 转换为tensor
-        input_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
+        input_tensor = torch.FloatTensor(features[:MODEL_CONFIG['sequence_length']]).unsqueeze(0).to(self.device)
 
-        # 数据归一化
-        mean = input_tensor.mean()
-        std = input_tensor.std() + 1e-6
+        # 数据归一化（使用更稳健的方法）
+        mean = input_tensor.mean(dim=1, keepdim=True)
+        std = input_tensor.std(dim=1, keepdim=True) + 1e-6
         input_tensor = (input_tensor - mean) / std
 
         return input_tensor
@@ -333,15 +352,47 @@ class TemporalModelAnalyzer:
         }
 
     def _calculate_stability_from_phases(self, phase_sequence: torch.Tensor) -> float:
-        """从阶段序列计算稳定性"""
+        """从阶段序列计算稳定性（优化版：更灵活的计算）"""
         if len(phase_sequence) < 2:
-            return 0.0
+            return 50.0  # 默认中等稳定性
 
         # 计算阶段转换次数
         transitions = torch.sum(phase_sequence[:-1] != phase_sequence[1:]).item()
-        # 转换次数越少越稳定
-        stability = max(0, 100 - transitions * 2)
-        return float(stability)
+
+        # 计算阶段分布的均匀性
+        phase_counts = torch.bincount(phase_sequence, minlength=3).float()
+        phase_ratios = phase_counts / len(phase_sequence)
+
+        # 理想的步态应该有合理的触地/腾空比例
+        # 触地约40-50%，腾空约30-40%，过渡约10-20%
+        ideal_ratios = torch.tensor([0.45, 0.35, 0.20])
+        ratio_diff = torch.abs(phase_ratios - ideal_ratios).sum().item()
+
+        # 计算节奏规律性（相邻阶段持续时间的一致性）
+        segment_lengths = []
+        current_phase = phase_sequence[0].item()
+        segment_start = 0
+
+        for i in range(1, len(phase_sequence)):
+            if phase_sequence[i].item() != current_phase:
+                segment_lengths.append(i - segment_start)
+                current_phase = phase_sequence[i].item()
+                segment_start = i
+
+        if len(segment_lengths) > 1:
+            rhythm_consistency = 100 - min(np.std(segment_lengths) * 5, 50)
+        else:
+            rhythm_consistency = 50
+
+        # 综合评分
+        transition_score = max(0, 100 - transitions * 1.5)  # 降低惩罚系数
+        ratio_score = max(0, 100 - ratio_diff * 100)
+        rhythm_score = rhythm_consistency
+
+        # 加权平均
+        stability = (transition_score * 0.4 + ratio_score * 0.3 + rhythm_score * 0.3)
+
+        return float(max(0, min(100, stability)))
 
     def _get_empty_results(self) -> Dict:
         """返回空结果"""

@@ -265,22 +265,30 @@ class KinematicAnalyzer:
                                   phases: List[int]) -> Dict:
         """
         按阶段统计膝关节角度
+        优化：触地第一帧角度更准确
         """
         # 分组收集各阶段的角度
         ground_contact_angles = []
+        ground_contact_first_frame_angles = []  # 触地第一帧角度
         flight_angles = []
         transition_angles = []
 
+        # 检测触地第一帧
+        prev_phase = -1
         for i, phase in enumerate(phases):
             if i < len(knee_left) and i < len(knee_right):
                 avg_knee = (knee_left[i] + knee_right[i]) / 2
                 if not np.isnan(avg_knee):
                     if phase == self.PHASE_GROUND_CONTACT:
                         ground_contact_angles.append(avg_knee)
+                        # 检测触地第一帧（从非触地转为触地）
+                        if prev_phase != self.PHASE_GROUND_CONTACT:
+                            ground_contact_first_frame_angles.append(avg_knee)
                     elif phase == self.PHASE_FLIGHT:
                         flight_angles.append(avg_knee)
                     else:
                         transition_angles.append(avg_knee)
+            prev_phase = phase
 
         # 计算各阶段统计量
         def safe_stats(angles):
@@ -298,9 +306,17 @@ class KinematicAnalyzer:
         knee_all = [(knee_left[i] + knee_right[i]) / 2 for i in range(min(len(knee_left), len(knee_right)))]
         knee_all = [x for x in knee_all if not np.isnan(x)]
 
+        # 触地期统计 - 优先使用第一帧角度
+        gc_stats = safe_stats(ground_contact_angles)
+        if ground_contact_first_frame_angles:
+            gc_stats['first_frame_mean'] = float(np.mean(ground_contact_first_frame_angles))
+            gc_stats['first_frame_count'] = len(ground_contact_first_frame_angles)
+            # 使用第一帧平均值作为主要指标
+            gc_stats['mean'] = gc_stats['first_frame_mean']
+
         return {
-            # 触地期角度（理想范围：155-170°）
-            'ground_contact': safe_stats(ground_contact_angles),
+            # 触地期角度（使用落地第一帧，理想范围：155-170°）
+            'ground_contact': gc_stats,
             # 腾空期/摆动期角度（理想范围：90-130°，弯曲较大）
             'flight': safe_stats(flight_angles),
             # 过渡期角度
@@ -408,86 +424,57 @@ class KinematicAnalyzer:
 
     def _analyze_gait_cycle(self, keypoints_sequence: List[Dict], fps: float) -> Dict:
         """
-        分析完整步态周期（改进版：输出毫秒时间）
+        分析完整步态周期（优化版：更精确的触地时间检测）
         """
-        phases = self._detect_gait_phases(keypoints_sequence, fps)
+        # 使用改进的触地检测算法
+        ground_contacts, flight_phases = self._detect_ground_contacts_improved(keypoints_sequence, fps)
 
-        # 统计各阶段占比
-        total = len(phases)
-        ground_contact_count = phases.count(self.PHASE_GROUND_CONTACT)
-        flight_count = phases.count(self.PHASE_FLIGHT)
-        transition_count = phases.count(self.PHASE_TRANSITION)
+        frame_duration_ms = 1000.0 / fps
 
-        ground_contact_ratio = ground_contact_count / total if total > 0 else 0
-        flight_ratio = flight_count / total if total > 0 else 0
-        transition_ratio = transition_count / total if total > 0 else 0
-
-        # 计算各阶段平均时间（毫秒）
-        frame_duration_ms = 1000.0 / fps  # 每帧时长(ms)
-
-        # 寻找连续的阶段片段来计算平均时长
+        # 计算触地时间（毫秒）- 更精确的计算
         ground_contact_durations_ms = []
+        for gc in ground_contacts:
+            duration_ms = gc['duration_frames'] * frame_duration_ms
+            # 过滤异常值（触地时间应在100-500ms之间）
+            if 100 < duration_ms < 500:
+                ground_contact_durations_ms.append(duration_ms)
+
+        # 计算腾空时间（毫秒）
         flight_durations_ms = []
-        transition_durations_ms = []
+        for fl in flight_phases:
+            duration_ms = fl['duration_frames'] * frame_duration_ms
+            # 过滤异常值（腾空时间应在50-400ms之间）
+            if 50 < duration_ms < 400:
+                flight_durations_ms.append(duration_ms)
 
-        current_phase = phases[0] if phases else -1
-        segment_start = 0
+        # 计算平均时长（去除极端值）
+        if ground_contact_durations_ms:
+            # 使用中位数更稳健
+            avg_ground_contact_ms = float(np.median(ground_contact_durations_ms))
+        else:
+            avg_ground_contact_ms = 0
 
-        for i in range(1, len(phases)):
-            if phases[i] != current_phase:
-                # 阶段切换，记录前一个阶段的时长
-                segment_frames = i - segment_start
-                segment_ms = segment_frames * frame_duration_ms
+        if flight_durations_ms:
+            avg_flight_ms = float(np.median(flight_durations_ms))
+        else:
+            avg_flight_ms = 0
 
-                if current_phase == self.PHASE_GROUND_CONTACT:
-                    ground_contact_durations_ms.append(segment_ms)
-                elif current_phase == self.PHASE_FLIGHT:
-                    flight_durations_ms.append(segment_ms)
-                elif current_phase == self.PHASE_TRANSITION:
-                    transition_durations_ms.append(segment_ms)
+        # 计算步态周期时间
+        if avg_ground_contact_ms > 0 and avg_flight_ms > 0:
+            avg_cycle_duration_ms = avg_ground_contact_ms + avg_flight_ms
+        else:
+            avg_cycle_duration_ms = 0
 
-                current_phase = phases[i]
-                segment_start = i
+        # 计算比例
+        total_time = avg_ground_contact_ms + avg_flight_ms
+        if total_time > 0:
+            ground_contact_ratio = avg_ground_contact_ms / total_time
+            flight_ratio = avg_flight_ms / total_time
+        else:
+            ground_contact_ratio = 0.5
+            flight_ratio = 0.5
 
-        # 处理最后一个片段
-        if phases:
-            segment_frames = len(phases) - segment_start
-            segment_ms = segment_frames * frame_duration_ms
-            if current_phase == self.PHASE_GROUND_CONTACT:
-                ground_contact_durations_ms.append(segment_ms)
-            elif current_phase == self.PHASE_FLIGHT:
-                flight_durations_ms.append(segment_ms)
-            elif current_phase == self.PHASE_TRANSITION:
-                transition_durations_ms.append(segment_ms)
-
-        # 计算平均时长
-        avg_ground_contact_ms = np.mean(ground_contact_durations_ms) if ground_contact_durations_ms else 0
-        avg_flight_ms = np.mean(flight_durations_ms) if flight_durations_ms else 0
-        avg_transition_ms = np.mean(transition_durations_ms) if transition_durations_ms else 0
-
-        # 计算步态周期时间（触地到下一次触地）
-        cycle_durations = []
-        i = 0
-        while i < len(phases) - 1:
-            if phases[i] == self.PHASE_GROUND_CONTACT:
-                start = i
-                j = i + 1
-                while j < len(phases) and phases[j] != self.PHASE_GROUND_CONTACT:
-                    j += 1
-                if j < len(phases):
-                    k = j + 1
-                    while k < len(phases) and phases[k] == self.PHASE_GROUND_CONTACT:
-                        k += 1
-                    if k > j:
-                        cycle_duration = (j - start) / fps
-                        if 0.3 < cycle_duration < 1.5:
-                            cycle_durations.append(cycle_duration)
-                i = j
-            else:
-                i += 1
-
-        avg_cycle_duration = np.mean(cycle_durations) if cycle_durations else 0
-        avg_cycle_duration_ms = avg_cycle_duration * 1000
+        transition_ratio = 0  # 过渡期合并到其他阶段
 
         return {
             'phase_distribution': {
@@ -499,15 +486,127 @@ class KinematicAnalyzer:
             'phase_duration_ms': {
                 'ground_contact': float(round(avg_ground_contact_ms, 1)),
                 'flight': float(round(avg_flight_ms, 1)),
-                'transition': float(round(avg_transition_ms, 1)),
+                'transition': 0.0,
             },
-            'avg_cycle_duration': float(avg_cycle_duration),
+            'avg_cycle_duration': float(avg_cycle_duration_ms / 1000) if avg_cycle_duration_ms > 0 else 0,
             'avg_cycle_duration_ms': float(round(avg_cycle_duration_ms, 1)),
-            'cycle_count': len(cycle_durations),
-            'phases': phases,
+            'cycle_count': len(ground_contact_durations_ms),
+            'ground_contact_times': ground_contact_durations_ms,  # 详细数据
+            'flight_times': flight_durations_ms,
             # 评估
-            'gait_rating': self._rate_gait_distribution(ground_contact_ratio, flight_ratio),
+            'gait_rating': self._rate_gait_timing(avg_ground_contact_ms),
         }
+
+    def _detect_ground_contacts_improved(self, keypoints_sequence: List[Dict], fps: float) -> Tuple[List[Dict], List[Dict]]:
+        """
+        改进的触地检测算法
+        基于脚踝Y坐标变化和速度分析
+        """
+        # 提取左右脚踝Y坐标
+        left_ankle_y = []
+        right_ankle_y = []
+
+        for kp in keypoints_sequence:
+            left = kp['landmarks'][27]
+            right = kp['landmarks'][28]
+
+            left_y = left['y_norm'] if left['visibility'] > 0.5 else np.nan
+            right_y = right['y_norm'] if right['visibility'] > 0.5 else np.nan
+
+            left_ankle_y.append(left_y)
+            right_ankle_y.append(right_y)
+
+        left_ankle_y = self._interpolate_nans(np.array(left_ankle_y))
+        right_ankle_y = self._interpolate_nans(np.array(right_ankle_y))
+
+        # 平滑处理
+        if len(left_ankle_y) > 5:
+            left_ankle_y = self._smooth_signal_advanced(left_ankle_y)
+            right_ankle_y = self._smooth_signal_advanced(right_ankle_y)
+
+        # 检测触地点（Y坐标峰值，因为Y轴向下）
+        min_distance = max(int(fps * 0.2), 5)  # 最小200ms间隔
+        prominence = 0.005  # 降低阈值提高敏感度
+
+        left_peaks, left_props = find_peaks(left_ankle_y, distance=min_distance, prominence=prominence)
+        right_peaks, right_props = find_peaks(right_ankle_y, distance=min_distance, prominence=prominence)
+
+        # 合并并排序所有触地点
+        all_contacts = []
+        for peak in left_peaks:
+            all_contacts.append({'frame': peak, 'foot': 'left', 'y': left_ankle_y[peak]})
+        for peak in right_peaks:
+            all_contacts.append({'frame': peak, 'foot': 'right', 'y': right_ankle_y[peak]})
+
+        all_contacts.sort(key=lambda x: x['frame'])
+
+        # 计算触地时长
+        ground_contacts = []
+        flight_phases = []
+
+        for i, contact in enumerate(all_contacts):
+            peak_frame = contact['frame']
+            foot = contact['foot']
+            ankle_y = left_ankle_y if foot == 'left' else right_ankle_y
+
+            # 找到触地开始和结束（Y坐标接近峰值的区域）
+            peak_y = ankle_y[peak_frame]
+            threshold = peak_y * 0.98  # 98%的峰值高度
+
+            # 向前找触地开始
+            start_frame = peak_frame
+            for j in range(peak_frame - 1, max(0, peak_frame - int(fps * 0.2)), -1):
+                if ankle_y[j] < threshold:
+                    start_frame = j + 1
+                    break
+
+            # 向后找触地结束
+            end_frame = peak_frame
+            for j in range(peak_frame + 1, min(len(ankle_y), peak_frame + int(fps * 0.2))):
+                if ankle_y[j] < threshold:
+                    end_frame = j
+                    break
+
+            duration_frames = end_frame - start_frame
+            if duration_frames > 2:  # 至少3帧
+                ground_contacts.append({
+                    'start_frame': start_frame,
+                    'end_frame': end_frame,
+                    'peak_frame': peak_frame,
+                    'duration_frames': duration_frames,
+                    'foot': foot
+                })
+
+            # 计算腾空时间（到下一个触地点）
+            if i < len(all_contacts) - 1:
+                next_contact = all_contacts[i + 1]
+                flight_duration = next_contact['frame'] - end_frame
+                if flight_duration > 2:
+                    flight_phases.append({
+                        'start_frame': end_frame,
+                        'end_frame': next_contact['frame'],
+                        'duration_frames': flight_duration
+                    })
+
+        return ground_contacts, flight_phases
+
+    def _rate_gait_timing(self, ground_contact_ms: float) -> Dict:
+        """
+        评估触地时间（新标准）
+        <210ms精英，210-240ms优秀，240-270ms良好，270-300ms一般，>300ms较差
+        """
+        if ground_contact_ms <= 0:
+            return {'level': 'unknown', 'score': 0, 'description': '数据不足'}
+        elif ground_contact_ms < 210:
+            return {'level': 'elite', 'score': 100, 'description': '精英水平'}
+        elif ground_contact_ms < 240:
+            return {'level': 'excellent', 'score': 90, 'description': '优秀'}
+        elif ground_contact_ms < 270:
+            return {'level': 'good', 'score': 75, 'description': '良好'}
+        elif ground_contact_ms < 300:
+            return {'level': 'fair', 'score': 60, 'description': '一般'}
+        else:
+            return {'level': 'poor', 'score': 45, 'description': '较差'}
 
     def _rate_gait_distribution(self, ground_ratio: float, flight_ratio: float) -> Dict:
         """
@@ -529,16 +628,16 @@ class KinematicAnalyzer:
 
     def _analyze_frontal_view(self, valid_frames: List[Dict], fps: float,
                                trunk_length: float) -> Dict:
-        """正面/后方视角分析 - 侧重力线和对称性"""
+        """正面/后方视角分析 - 侧重力线和肩部稳定（移除对称性）"""
         results = {
             'lower_limb_alignment': self._calculate_lower_limb_alignment(valid_frames),
-            'gait_symmetry': self._calculate_gait_symmetry_detailed(valid_frames),
             'lateral_stability': self._calculate_lateral_stability(valid_frames),
             'vertical_motion': self._calculate_vertical_motion_normalized(
                 valid_frames, fps, trunk_length
             ),
             'cadence': self._calculate_cadence_improved(valid_frames, fps),
-            'stability': self._calculate_stability_improved(valid_frames),
+            'stability': self._calculate_stability_front_view(valid_frames),
+            'gait_cycle': self._analyze_gait_cycle(valid_frames, fps),
         }
         return results
 
@@ -901,17 +1000,17 @@ class KinematicAnalyzer:
         }
 
     def _rate_cadence(self, cadence: float) -> Dict:
-        """评估步频（保留用户原有阈值逻辑）"""
-        if 180 <= cadence <= 200:
-            return {'level': 'optimal', 'score': 100, 'description': '步频处于最佳范围'}
-        elif 170 <= cadence < 180 or 200 < cadence <= 210:
-            return {'level': 'good', 'score': 85, 'description': '步频良好'}
-        elif 160 <= cadence < 170 or 210 < cadence <= 220:
-            return {'level': 'fair', 'score': 70, 'description': '步频可以优化'}
-        elif cadence < 160:
-            return {'level': 'low', 'score': 55, 'description': '步频偏低，建议提高'}
+        """评估步频（新标准：5个等级）"""
+        if cadence >= 185:
+            return {'level': 'elite', 'score': 100, 'description': '精英'}
+        elif cadence >= 175:
+            return {'level': 'excellent', 'score': 90, 'description': '优秀'}
+        elif cadence >= 165:
+            return {'level': 'good', 'score': 75, 'description': '良好'}
+        elif cadence >= 155:
+            return {'level': 'fair', 'score': 60, 'description': '一般'}
         else:
-            return {'level': 'high', 'score': 60, 'description': '步频偏高，注意控制'}
+            return {'level': 'poor', 'score': 45, 'description': '较差'}
 
     def _cadence_from_knee_angle(self, keypoints_sequence: List[Dict], fps: float) -> Tuple[float, int]:
         """从膝关节角度计算步频"""
@@ -1056,22 +1155,36 @@ class KinematicAnalyzer:
             'rating': self._rate_stability(overall)
         }
 
-    def _calculate_stability_improved(self, keypoints_sequence: List[Dict]) -> Dict:
-        """改进的稳定性计算（正面视角使用，包含对称性和肩部晃动）"""
+    def _calculate_stability_front_view(self, keypoints_sequence: List[Dict]) -> Dict:
+        """正面视角稳定性计算（移除对称性，提高肩部晃动权重）"""
         trunk_stability = self._calculate_trunk_stability(keypoints_sequence)
         head_stability = self._calculate_head_stability(keypoints_sequence)
-        gait_symmetry = self._calculate_gait_symmetry(keypoints_sequence)
         shoulder_sway = self._calculate_shoulder_sway(keypoints_sequence)
 
-        # 正面视角：加入肩部晃动评估
-        overall = (trunk_stability * 0.35 + head_stability * 0.15 +
-                   gait_symmetry * 0.25 + shoulder_sway * 0.25)
+        # 正面视角：提高肩部晃动权重（移除对称性）
+        overall = (trunk_stability * 0.35 + head_stability * 0.15 + shoulder_sway * 0.50)
 
         return {
             'overall': float(overall),
             'trunk': float(trunk_stability),
             'head': float(head_stability),
-            'symmetry': float(gait_symmetry),
+            'shoulder_sway': float(shoulder_sway),
+            'rating': self._rate_stability(overall)
+        }
+
+    def _calculate_stability_improved(self, keypoints_sequence: List[Dict]) -> Dict:
+        """改进的稳定性计算（兼容用途）"""
+        trunk_stability = self._calculate_trunk_stability(keypoints_sequence)
+        head_stability = self._calculate_head_stability(keypoints_sequence)
+        shoulder_sway = self._calculate_shoulder_sway(keypoints_sequence)
+
+        # 移除对称性，使用肩部晃动
+        overall = (trunk_stability * 0.40 + head_stability * 0.20 + shoulder_sway * 0.40)
+
+        return {
+            'overall': float(overall),
+            'trunk': float(trunk_stability),
+            'head': float(head_stability),
             'shoulder_sway': float(shoulder_sway),
             'rating': self._rate_stability(overall)
         }
