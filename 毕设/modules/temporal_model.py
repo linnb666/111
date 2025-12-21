@@ -1,114 +1,301 @@
-# modules/temporal_model.py (修复版)
 """
-时序深度学习分析模块（修复版）
-修复：适配CNN模型的5维输出
+时序深度学习分析模块（升级版）
+
+整合新的Transformer和CNN模型，支持：
+1. 视角感知分析
+2. Transformer阶段分类（可选CRF）
+3. 多尺度TCN质量评估
+4. 联合模型推理
+
+适用于毕业设计：基于深度学习的跑步动作视频解析与技术质量评价系统
 """
+
 import torch
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
 from pathlib import Path
+import warnings
+
 from config.config import MODEL_CONFIG, CHECKPOINT_DIR
 
 
 class TemporalModelAnalyzer:
-    """时序模型分析器（修复版）"""
+    """
+    时序深度学习分析器（升级版）
 
-    def __init__(self, device='cpu'):
-        """初始化模型"""
+    支持多种模型后端：
+    - legacy: 原有LSTM+CNN模型
+    - transformer: 新的Transformer阶段分类模型
+    - joint: 联合阶段分类和质量评估模型
+    """
+
+    # 视角ID映射
+    VIEW_TO_ID = {'side': 0, 'front': 1, 'back': 2, 'mixed': 3}
+
+    def __init__(self, model_type: str = 'joint', device: str = 'cpu'):
+        """
+        初始化模型分析器
+
+        Args:
+            model_type: 模型类型
+                - 'legacy': 使用原有LSTM+CNN
+                - 'transformer': 使用Transformer阶段分类
+                - 'joint': 使用联合模型（推荐）
+            device: 设备 ('cpu' 或 'cuda')
+        """
+        self.model_type = model_type
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
 
-        # 导入分离后的模型
+        # 加载模型
+        self._load_models()
+
+    def _load_models(self):
+        """加载模型"""
+        if self.model_type == 'legacy':
+            self._load_legacy_models()
+        elif self.model_type == 'transformer':
+            self._load_transformer_models()
+        elif self.model_type == 'joint':
+            self._load_joint_model()
+        else:
+            raise ValueError(f"未知模型类型: {self.model_type}")
+
+    def _load_legacy_models(self):
+        """加载原有模型"""
+        try:
+            from models.lstm_model import RunningPhaseLSTM
+            from models.cnn_model import RunningQualityCNN
+
+            self.phase_model = RunningPhaseLSTM().to(self.device)
+            self.quality_model = RunningQualityCNN().to(self.device)
+
+            # 加载权重
+            self._load_checkpoint(self.phase_model, 'phase_model.pth')
+            self._load_checkpoint(self.quality_model, 'quality_model.pth')
+
+            self.phase_model.eval()
+            self.quality_model.eval()
+
+            print(f"✅ 加载Legacy模型成功 (LSTM + CNN)")
+
+        except Exception as e:
+            warnings.warn(f"加载Legacy模型失败: {e}，使用随机初始化")
+            self._init_random_legacy()
+
+    def _load_transformer_models(self):
+        """加载Transformer模型"""
+        try:
+            from models.transformer_model import RunningPhaseTransformer
+            from models.quality_model import RunningQualityModel
+
+            self.phase_model = RunningPhaseTransformer(
+                d_model=128,
+                num_heads=8,
+                num_layers=4
+            ).to(self.device)
+
+            self.quality_model = RunningQualityModel(
+                hidden_dim=128,
+                num_levels=4
+            ).to(self.device)
+
+            # 加载权重
+            self._load_checkpoint(self.phase_model, 'transformer_phase_model.pth')
+            self._load_checkpoint(self.quality_model, 'quality_tcn_model.pth')
+
+            self.phase_model.eval()
+            self.quality_model.eval()
+
+            print(f"✅ 加载Transformer模型成功")
+
+        except Exception as e:
+            warnings.warn(f"加载Transformer模型失败: {e}，回退到Legacy模型")
+            self.model_type = 'legacy'
+            self._load_legacy_models()
+
+    def _load_joint_model(self):
+        """加载联合模型"""
+        try:
+            from models.quality_model import JointPhaseQualityModel
+
+            self.joint_model = JointPhaseQualityModel(
+                hidden_dim=128,
+                num_levels=4
+            ).to(self.device)
+
+            # 加载权重
+            self._load_checkpoint(self.joint_model, 'joint_model.pth')
+            self.joint_model.eval()
+
+            print(f"✅ 加载联合模型成功")
+
+        except Exception as e:
+            warnings.warn(f"加载联合模型失败: {e}，回退到Transformer模型")
+            self.model_type = 'transformer'
+            self._load_transformer_models()
+
+    def _load_checkpoint(self, model, filename: str) -> bool:
+        """加载模型权重"""
+        checkpoint_path = CHECKPOINT_DIR / filename
+
+        if checkpoint_path.exists():
+            try:
+                state_dict = torch.load(checkpoint_path, map_location=self.device)
+                model.load_state_dict(state_dict)
+                print(f"   加载权重: {filename}")
+                return True
+            except Exception as e:
+                print(f"   ⚠️ 加载 {filename} 失败: {e}")
+                return False
+        else:
+            print(f"   ℹ️ 未找到 {filename}，使用随机初始化")
+            return False
+
+    def _init_random_legacy(self):
+        """初始化随机Legacy模型"""
         from models.lstm_model import RunningPhaseLSTM
         from models.cnn_model import RunningQualityCNN
 
-        # 实例化模型
         self.phase_model = RunningPhaseLSTM().to(self.device)
         self.quality_model = RunningQualityCNN().to(self.device)
-
-        # 加载预训练权重（如果存在）
-        self._load_pretrained_weights()
-
         self.phase_model.eval()
         self.quality_model.eval()
 
-    def _load_pretrained_weights(self):
-        """加载预训练权重"""
-        phase_checkpoint = CHECKPOINT_DIR / 'phase_model.pth'
-        quality_checkpoint = CHECKPOINT_DIR / 'quality_model.pth'
-
-        if phase_checkpoint.exists():
-            try:
-                self.phase_model.load_state_dict(
-                    torch.load(phase_checkpoint, map_location=self.device)
-                )
-                print(f"加载阶段模型权重: {phase_checkpoint}")
-            except Exception as e:
-                print(f"⚠️  警告: 无法加载阶段模型权重 - {e}")
-        else:
-            print(f"ℹ️  未找到阶段模型权重文件，使用随机初始化")
-
-        if quality_checkpoint.exists():
-            try:
-                self.quality_model.load_state_dict(
-                    torch.load(quality_checkpoint, map_location=self.device)
-                )
-                print(f"加载质量模型权重: {quality_checkpoint}")
-            except Exception as e:
-                print(f"⚠️  警告: 无法加载质量模型权重 - {e}")
-        else:
-            print(f"ℹ️  未找到质量模型权重文件，使用随机初始化")
-
-    def analyze(self, keypoints_sequence: List[Dict]) -> Dict:
+    def analyze(self, keypoints_sequence: List[Dict],
+                view_angle: str = 'side') -> Dict:
         """
-        分析关键点序列（修复版 - 适配5维输出）
+        分析关键点序列
+
         Args:
             keypoints_sequence: 关键点时间序列
+            view_angle: 视角类型 ('side', 'front', 'back', 'mixed')
+
         Returns:
-            分析结果
+            分析结果字典
         """
         # 准备输入数据
         input_tensor = self._prepare_input(keypoints_sequence)
 
         if input_tensor is None:
-            print("⚠️  输入数据不足，返回空结果")
+            print("⚠️ 输入数据不足，返回默认结果")
             return self._get_empty_results()
 
+        # 视角ID
+        view_id = torch.tensor([self.VIEW_TO_ID.get(view_angle, 0)], device=self.device)
+
+        # 根据模型类型进行推理
         with torch.no_grad():
-            # 阶段分类
-            phase_output = self.phase_model(input_tensor)
-            phase_probs = torch.softmax(phase_output, dim=-1)
-            phase_labels = torch.argmax(phase_probs, dim=-1)
-
-            # 质量评分（现在输出5个维度）
-            quality_scores = self.quality_model(input_tensor)  # (batch, 5)
-
-        # 解析5维质量评分
-        quality_scores_np = quality_scores.cpu().numpy()[0]  # 获取第一个样本
-
-        results = {
-            'phase_sequence': phase_labels.cpu().numpy().tolist()[0],
-            'phase_distribution': {
-                'ground_contact': float(torch.sum(phase_labels == 0).item() / len(phase_labels[0])),
-                'flight': float(torch.sum(phase_labels == 1).item() / len(phase_labels[0])),
-                'transition': float(torch.sum(phase_labels == 2).item() / len(phase_labels[0]))
-            },
-            # 修复：解析5个维度的评分
-            'quality_score': float(quality_scores_np[0]),  # 总分
-            'quality_stability': float(quality_scores_np[1]),  # 稳定性
-            'quality_efficiency': float(quality_scores_np[2]),  # 效率
-            'quality_form': float(quality_scores_np[3]),  # 跑姿
-            'quality_rhythm': float(quality_scores_np[4]),  # 节奏
-            'stability_score': self._calculate_stability_from_phases(phase_labels[0])
-        }
+            if self.model_type == 'joint':
+                results = self._analyze_joint(input_tensor, view_id)
+            elif self.model_type == 'transformer':
+                results = self._analyze_transformer(input_tensor, view_id)
+            else:  # legacy
+                results = self._analyze_legacy(input_tensor)
 
         return results
 
-    def _prepare_input(self, keypoints_sequence: List[Dict]) -> torch.Tensor:
+    def _analyze_joint(self, input_tensor: torch.Tensor,
+                       view_id: torch.Tensor) -> Dict:
+        """使用联合模型分析"""
+        outputs = self.joint_model(input_tensor, view_id)
+
+        # 阶段预测
+        phase_probs = torch.softmax(outputs['phase_logits'], dim=-1)
+        phase_labels = torch.argmax(phase_probs, dim=-1)
+
+        # 质量评分
+        quality_scores = outputs['quality_scores'].cpu().numpy()[0]
+
+        # 注意力权重
+        attention_weights = outputs['attention_weights'].cpu().numpy()[0]
+
+        # 计算阶段分布
+        phase_distribution = self._calculate_phase_distribution(phase_labels[0])
+
+        # 计算稳定性
+        stability_score = self._calculate_stability_from_phases(phase_labels[0])
+
+        return {
+            'phase_sequence': phase_labels.cpu().numpy().tolist()[0],
+            'phase_distribution': phase_distribution,
+            'quality_score': float(quality_scores[0]),
+            'quality_stability': float(quality_scores[1]),
+            'quality_efficiency': float(quality_scores[2]),
+            'quality_form': float(quality_scores[3]),
+            'quality_rhythm': float(quality_scores[4]),
+            'stability_score': stability_score,
+            'attention_weights': attention_weights.tolist(),
+            'model_type': 'joint'
+        }
+
+    def _analyze_transformer(self, input_tensor: torch.Tensor,
+                             view_id: torch.Tensor) -> Dict:
+        """使用Transformer模型分析"""
+        # 阶段分类
+        predictions, probs = self.phase_model.predict(input_tensor, view_id)
+
+        # 质量评估
+        quality_output = self.quality_model(input_tensor, view_id, return_attention=True)
+        quality_scores = quality_output['scores'].cpu().numpy()[0]
+        attention_weights = quality_output.get('attention_weights', None)
+
+        # 计算阶段分布
+        phase_distribution = self._calculate_phase_distribution(predictions[0])
+
+        # 计算稳定性
+        stability_score = self._calculate_stability_from_phases(predictions[0])
+
+        results = {
+            'phase_sequence': predictions.cpu().numpy().tolist()[0],
+            'phase_distribution': phase_distribution,
+            'quality_score': float(quality_scores[0]),
+            'quality_stability': float(quality_scores[1]),
+            'quality_efficiency': float(quality_scores[2]),
+            'quality_form': float(quality_scores[3]),
+            'quality_rhythm': float(quality_scores[4]),
+            'stability_score': stability_score,
+            'model_type': 'transformer'
+        }
+
+        if attention_weights is not None:
+            results['attention_weights'] = attention_weights.cpu().numpy().tolist()[0]
+
+        return results
+
+    def _analyze_legacy(self, input_tensor: torch.Tensor) -> Dict:
+        """使用Legacy模型分析"""
+        # 阶段分类
+        phase_output = self.phase_model(input_tensor)
+        phase_probs = torch.softmax(phase_output, dim=-1)
+        phase_labels = torch.argmax(phase_probs, dim=-1)
+
+        # 质量评分
+        quality_scores = self.quality_model(input_tensor).cpu().numpy()[0]
+
+        # 计算阶段分布
+        phase_distribution = self._calculate_phase_distribution(phase_labels[0])
+
+        # 计算稳定性
+        stability_score = self._calculate_stability_from_phases(phase_labels[0])
+
+        return {
+            'phase_sequence': phase_labels.cpu().numpy().tolist()[0],
+            'phase_distribution': phase_distribution,
+            'quality_score': float(quality_scores[0]),
+            'quality_stability': float(quality_scores[1]),
+            'quality_efficiency': float(quality_scores[2]),
+            'quality_form': float(quality_scores[3]),
+            'quality_rhythm': float(quality_scores[4]),
+            'stability_score': stability_score,
+            'model_type': 'legacy'
+        }
+
+    def _prepare_input(self, keypoints_sequence: List[Dict]) -> Optional[torch.Tensor]:
         """准备模型输入"""
-        valid_frames = [kp for kp in keypoints_sequence if kp['detected']]
+        valid_frames = [kp for kp in keypoints_sequence if kp.get('detected', False)]
 
         if len(valid_frames) < MODEL_CONFIG['sequence_length']:
-            print(f"⚠️  有效帧数 {len(valid_frames)} < 最小序列长度 {MODEL_CONFIG['sequence_length']}")
+            print(f"⚠️ 有效帧数 {len(valid_frames)} < 最小序列长度 {MODEL_CONFIG['sequence_length']}")
             return None
 
         # 提取关键点坐标（归一化）
@@ -122,17 +309,37 @@ class TemporalModelAnalyzer:
         # 转换为tensor
         input_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
 
-        # 数据归一化（与训练时保持一致）
+        # 数据归一化
         mean = input_tensor.mean()
         std = input_tensor.std() + 1e-6
         input_tensor = (input_tensor - mean) / std
 
         return input_tensor
 
+    def _calculate_phase_distribution(self, phase_sequence: torch.Tensor) -> Dict[str, float]:
+        """计算阶段分布"""
+        total = len(phase_sequence)
+        if total == 0:
+            return {'ground_contact': 0, 'flight': 0, 'transition': 0}
+
+        ground_contact = float(torch.sum(phase_sequence == 0).item() / total)
+        flight = float(torch.sum(phase_sequence == 1).item() / total)
+        transition = float(torch.sum(phase_sequence == 2).item() / total)
+
+        return {
+            'ground_contact': ground_contact,
+            'flight': flight,
+            'transition': transition
+        }
+
     def _calculate_stability_from_phases(self, phase_sequence: torch.Tensor) -> float:
         """从阶段序列计算稳定性"""
+        if len(phase_sequence) < 2:
+            return 0.0
+
         # 计算阶段转换次数
         transitions = torch.sum(phase_sequence[:-1] != phase_sequence[1:]).item()
+        # 转换次数越少越稳定
         stability = max(0, 100 - transitions * 2)
         return float(stability)
 
@@ -146,29 +353,135 @@ class TemporalModelAnalyzer:
             'quality_efficiency': 0.0,
             'quality_form': 0.0,
             'quality_rhythm': 0.0,
-            'stability_score': 0.0
+            'stability_score': 0.0,
+            'model_type': self.model_type
         }
 
 
-# 模块测试代码
+class TemporalModelEnsemble:
+    """
+    模型集成分析器
+
+    结合多个模型的预测，提高准确性和鲁棒性
+    """
+
+    def __init__(self, device: str = 'cpu'):
+        self.device = device
+        self.analyzers = []
+
+        # 尝试加载多个模型
+        for model_type in ['joint', 'transformer', 'legacy']:
+            try:
+                analyzer = TemporalModelAnalyzer(model_type=model_type, device=device)
+                self.analyzers.append(analyzer)
+            except Exception as e:
+                print(f"⚠️ 无法加载 {model_type} 模型: {e}")
+
+        if not self.analyzers:
+            raise RuntimeError("没有可用的模型")
+
+        print(f"✅ 集成分析器初始化完成，共 {len(self.analyzers)} 个模型")
+
+    def analyze(self, keypoints_sequence: List[Dict],
+                view_angle: str = 'side') -> Dict:
+        """
+        集成分析
+
+        Args:
+            keypoints_sequence: 关键点序列
+            view_angle: 视角
+
+        Returns:
+            集成结果
+        """
+        results_list = []
+
+        for analyzer in self.analyzers:
+            try:
+                result = analyzer.analyze(keypoints_sequence, view_angle)
+                results_list.append(result)
+            except Exception as e:
+                print(f"⚠️ {analyzer.model_type} 模型分析失败: {e}")
+
+        if not results_list:
+            return self.analyzers[0]._get_empty_results()
+
+        # 集成结果
+        return self._ensemble_results(results_list)
+
+    def _ensemble_results(self, results_list: List[Dict]) -> Dict:
+        """集成多个模型的结果"""
+        n = len(results_list)
+
+        # 质量评分取平均
+        quality_score = np.mean([r['quality_score'] for r in results_list])
+        quality_stability = np.mean([r['quality_stability'] for r in results_list])
+        quality_efficiency = np.mean([r['quality_efficiency'] for r in results_list])
+        quality_form = np.mean([r['quality_form'] for r in results_list])
+        quality_rhythm = np.mean([r['quality_rhythm'] for r in results_list])
+        stability_score = np.mean([r['stability_score'] for r in results_list])
+
+        # 阶段分布取平均
+        phase_distribution = {}
+        for key in ['ground_contact', 'flight', 'transition']:
+            phase_distribution[key] = np.mean([r['phase_distribution'][key] for r in results_list])
+
+        # 使用第一个模型的阶段序列（通常是最好的模型）
+        phase_sequence = results_list[0]['phase_sequence']
+
+        return {
+            'phase_sequence': phase_sequence,
+            'phase_distribution': phase_distribution,
+            'quality_score': float(quality_score),
+            'quality_stability': float(quality_stability),
+            'quality_efficiency': float(quality_efficiency),
+            'quality_form': float(quality_form),
+            'quality_rhythm': float(quality_rhythm),
+            'stability_score': float(stability_score),
+            'model_type': 'ensemble',
+            'num_models': n
+        }
+
+
+# 为了向后兼容，保留原有接口
+def create_analyzer(model_type: str = 'joint', device: str = 'cpu') -> TemporalModelAnalyzer:
+    """
+    创建分析器的工厂函数
+
+    Args:
+        model_type: 模型类型 ('legacy', 'transformer', 'joint', 'ensemble')
+        device: 设备
+
+    Returns:
+        分析器实例
+    """
+    if model_type == 'ensemble':
+        return TemporalModelEnsemble(device)
+    else:
+        return TemporalModelAnalyzer(model_type, device)
+
+
+# ============================================================================
+# 测试代码
+# ============================================================================
+
 if __name__ == "__main__":
     import sys
-
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-    print("=" * 60)
-    print("测试修复后的时序深度学习分析模块")
-    print("=" * 60)
+    print("=" * 70)
+    print("测试时序深度学习分析模块（升级版）")
+    print("=" * 70)
 
     # 创建模拟关键点数据
     print("\n生成模拟关键点数据...")
     mock_keypoints = []
-    for i in range(35):  # 35帧
+    for i in range(35):
         kp = {
             'detected': True,
             'landmarks': []
         }
-        for j in range(33):  # 33个关键点
+        for j in range(33):
             kp['landmarks'].append({
                 'x_norm': np.random.rand(),
                 'y_norm': np.random.rand(),
@@ -176,26 +489,29 @@ if __name__ == "__main__":
             })
         mock_keypoints.append(kp)
 
-    # 创建分析器
-    print("\n初始化时序分析器...")
-    analyzer = TemporalModelAnalyzer()
+    # 测试不同模型类型
+    for model_type in ['legacy', 'joint']:
+        print(f"\n{'='*50}")
+        print(f"测试 {model_type} 模型:")
+        print('='*50)
 
-    # 执行分析
-    print("\n执行深度学习分析...")
-    results = analyzer.analyze(mock_keypoints)
+        try:
+            analyzer = TemporalModelAnalyzer(model_type=model_type)
 
-    # 打印结果
-    print("\n" + "=" * 60)
-    print("分析结果:")
-    print("=" * 60)
-    print(f"质量总分: {results['quality_score']:.2f}")
-    print(f"  - 稳定性: {results['quality_stability']:.2f}")
-    print(f"  - 效率: {results['quality_efficiency']:.2f}")
-    print(f"  - 跑姿: {results['quality_form']:.2f}")
-    print(f"  - 节奏: {results['quality_rhythm']:.2f}")
-    print(f"阶段稳定性: {results['stability_score']:.2f}")
-    print(f"\n阶段分布:")
-    for phase, ratio in results['phase_distribution'].items():
-        print(f"  {phase}: {ratio * 100:.1f}%")
+            # 测试不同视角
+            for view in ['side', 'front', 'mixed']:
+                results = analyzer.analyze(mock_keypoints, view_angle=view)
+                print(f"\n视角: {view}")
+                print(f"  质量评分: {results['quality_score']:.2f}")
+                print(f"  稳定性: {results['quality_stability']:.2f}")
+                print(f"  效率: {results['quality_efficiency']:.2f}")
+                print(f"  阶段分布: 触地{results['phase_distribution']['ground_contact']*100:.1f}% | "
+                      f"腾空{results['phase_distribution']['flight']*100:.1f}% | "
+                      f"过渡{results['phase_distribution']['transition']*100:.1f}%")
 
-    print("\n✅ 模块测试完成!")
+        except Exception as e:
+            print(f"  ❌ 测试失败: {e}")
+
+    print("\n" + "=" * 70)
+    print("✅ 测试完成!")
+    print("=" * 70)
