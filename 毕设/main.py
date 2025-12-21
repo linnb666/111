@@ -111,7 +111,7 @@ def run_analysis_pipeline(video_path: str, output_dir: Path, visualize: bool = F
     if view_mode == 'auto':
         view_detector = ViewAngleDetector()
         view_result = view_detector.detect_view_angle(keypoints_sequence)
-        detected_view = view_result['view_angle']
+        detected_view = view_result['primary_view']  # 修复: 使用正确的键名
         view_confidence = view_result['confidence']
         print(f"   检测视角: {get_view_name(detected_view)}")
         print(f"   置信度: {view_confidence*100:.1f}%")
