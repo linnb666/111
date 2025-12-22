@@ -314,9 +314,9 @@ class ViewAngleDetector:
             self.VIEW_FRONT: {
                 'primary_metrics': [
                     'lower_limb_alignment',  # 下肢力线
-                    'gait_symmetry',         # 步态对称性
                     'lateral_stability',     # 横向稳定性
                     'knee_valgus',           # 膝外翻/内扣
+                    'shoulder_sway',         # 肩部晃动
                 ],
                 'secondary_metrics': [
                     'cadence',
@@ -328,12 +328,11 @@ class ViewAngleDetector:
             self.VIEW_BACK: {
                 'primary_metrics': [
                     'lower_limb_alignment',
-                    'gait_symmetry',
+                    'lateral_stability',
                     'heel_strike_pattern',   # 后足着地模式
                     'trunk_rotation',        # 躯干旋转
                 ],
                 'secondary_metrics': [
-                    'lateral_stability',
                     'cadence',
                 ],
                 'analysis_focus': '后方步态分析',
