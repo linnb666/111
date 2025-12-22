@@ -207,10 +207,16 @@ class KinematicAnalyzer:
     def _detect_gait_phases(self, keypoints_sequence: List[Dict],
                             fps: float) -> List[int]:
         """
-        检测每一帧的步态阶段
-        基于脚踝Y坐标和膝关节角度判断
+        检测每一帧的步态阶段（重写版：基于速度的状态机）
+
+        核心改进：
+        1. 使用脚踝Y坐标速度判断状态
+        2. 基于脚踝高度（Y值）确定触地/腾空
+        3. 自适应阈值（按帧率缩放）
         """
-        phases = []
+        n_frames = len(keypoints_sequence)
+        if n_frames < 3:
+            return [self.PHASE_TRANSITION] * n_frames
 
         # 提取脚踝Y坐标
         left_ankle_y = []
@@ -234,31 +240,70 @@ class KinematicAnalyzer:
             left_ankle_y = self._smooth_signal_advanced(left_ankle_y)
             right_ankle_y = self._smooth_signal_advanced(right_ankle_y)
 
-        # 检测触地点（Y坐标最大值，因为Y轴向下）
-        left_peaks, _ = find_peaks(left_ankle_y, distance=int(fps * 0.25))
-        right_peaks, _ = find_peaks(right_ankle_y, distance=int(fps * 0.25))
+        # 计算每帧取较低脚踝的Y值（触地的脚）
+        lower_ankle_y = np.maximum(left_ankle_y, right_ankle_y)  # Y轴向下，值大=位置低
 
-        # 合并所有触地点
-        all_ground_contacts = sorted(set(list(left_peaks) + list(right_peaks)))
+        # 计算速度（Y坐标变化率）
+        velocity = np.gradient(lower_ankle_y) * fps
 
-        # 为每一帧标注阶段
-        for i in range(len(keypoints_sequence)):
-            # 找到最近的触地点
-            distances = [abs(i - gc) for gc in all_ground_contacts]
-            if distances:
-                min_dist = min(distances)
-                frame_window = fps * 0.1  # 100ms窗口
+        # 自适应阈值计算
+        y_median = np.median(lower_ankle_y)
+        y_std = np.std(lower_ankle_y)
+        y_max = np.max(lower_ankle_y)  # 最低点（触地）
+        y_min = np.min(lower_ankle_y)  # 最高点（腾空）
+        y_range = y_max - y_min
 
-                if min_dist < frame_window:
-                    phases.append(self.PHASE_GROUND_CONTACT)
-                elif min_dist < frame_window * 2:
-                    phases.append(self.PHASE_TRANSITION)
-                else:
-                    phases.append(self.PHASE_FLIGHT)
+        # 阈值设置（基于数据分布）
+        ground_threshold = y_max - y_range * 0.25  # 上方25%范围为触地
+        flight_threshold = y_min + y_range * 0.35  # 下方35%范围为腾空
+        velocity_threshold = y_std * fps * 0.3  # 速度阈值
+
+        # 状态机检测相位
+        phases = []
+        for i in range(n_frames):
+            y = lower_ankle_y[i]
+            v = abs(velocity[i]) if i < len(velocity) else 0
+
+            if y >= ground_threshold and v < velocity_threshold * 2:
+                # 脚踝位置低且速度小 = 触地
+                phases.append(self.PHASE_GROUND_CONTACT)
+            elif y <= flight_threshold:
+                # 脚踝位置高 = 腾空
+                phases.append(self.PHASE_FLIGHT)
             else:
+                # 中间区域 = 过渡
                 phases.append(self.PHASE_TRANSITION)
 
+        # 后处理：消除孤立状态（至少连续2帧才算有效状态）
+        phases = self._smooth_phases(phases, min_duration=2)
+
         return phases
+
+    def _smooth_phases(self, phases: List[int], min_duration: int = 2) -> List[int]:
+        """平滑相位序列，消除孤立的错误检测"""
+        if len(phases) < min_duration * 2:
+            return phases
+
+        smoothed = phases.copy()
+
+        # 检测并修复孤立状态
+        i = 0
+        while i < len(smoothed):
+            # 找到当前状态的连续区间
+            start = i
+            current_phase = smoothed[i]
+            while i < len(smoothed) and smoothed[i] == current_phase:
+                i += 1
+            duration = i - start
+
+            # 如果持续时间太短，用前后状态替换
+            if duration < min_duration and start > 0 and i < len(smoothed):
+                # 使用前一个状态填充
+                prev_phase = smoothed[start - 1]
+                for j in range(start, i):
+                    smoothed[j] = prev_phase
+
+        return smoothed
 
     def _analyze_angles_by_phase(self, knee_left: List[float],
                                   knee_right: List[float],
@@ -425,36 +470,55 @@ class KinematicAnalyzer:
     def _analyze_gait_cycle(self, keypoints_sequence: List[Dict], fps: float) -> Dict:
         """
         分析完整步态周期（优化版：更精确的触地时间检测）
+
+        帧率自适应：根据fps调整过滤阈值
         """
         # 使用改进的触地检测算法
         ground_contacts, flight_phases = self._detect_ground_contacts_improved(keypoints_sequence, fps)
 
         frame_duration_ms = 1000.0 / fps
 
-        # 计算触地时间（毫秒）- 更精确的计算
+        # 帧率自适应的过滤范围
+        # 精英跑者触地时间：160-220ms
+        # 普通跑者触地时间：220-300ms
+        # 较差跑者触地时间：280-400ms
+        min_gc_ms = 120  # 最小触地时间（考虑测量误差）
+        max_gc_ms = 450  # 最大触地时间
+
+        # 腾空时间范围
+        min_flight_ms = 40  # 最小腾空时间
+        max_flight_ms = 350  # 最大腾空时间
+
+        # 计算触地时间（毫秒）
         ground_contact_durations_ms = []
         for gc in ground_contacts:
             duration_ms = gc['duration_frames'] * frame_duration_ms
-            # 过滤异常值（触地时间应在100-500ms之间）
-            if 100 < duration_ms < 500:
+            if min_gc_ms <= duration_ms <= max_gc_ms:
                 ground_contact_durations_ms.append(duration_ms)
 
         # 计算腾空时间（毫秒）
         flight_durations_ms = []
         for fl in flight_phases:
             duration_ms = fl['duration_frames'] * frame_duration_ms
-            # 过滤异常值（腾空时间应在50-400ms之间）
-            if 50 < duration_ms < 400:
+            if min_flight_ms <= duration_ms <= max_flight_ms:
                 flight_durations_ms.append(duration_ms)
 
-        # 计算平均时长（去除极端值）
-        if ground_contact_durations_ms:
-            # 使用中位数更稳健
+        # 使用稳健统计（去除异常值后的平均）
+        if len(ground_contact_durations_ms) >= 3:
+            # 去除最高和最低值后取平均
+            sorted_gc = sorted(ground_contact_durations_ms)
+            trimmed_gc = sorted_gc[1:-1] if len(sorted_gc) > 2 else sorted_gc
+            avg_ground_contact_ms = float(np.mean(trimmed_gc))
+        elif ground_contact_durations_ms:
             avg_ground_contact_ms = float(np.median(ground_contact_durations_ms))
         else:
             avg_ground_contact_ms = 0
 
-        if flight_durations_ms:
+        if len(flight_durations_ms) >= 3:
+            sorted_fl = sorted(flight_durations_ms)
+            trimmed_fl = sorted_fl[1:-1] if len(sorted_fl) > 2 else sorted_fl
+            avg_flight_ms = float(np.mean(trimmed_fl))
+        elif flight_durations_ms:
             avg_flight_ms = float(np.median(flight_durations_ms))
         else:
             avg_flight_ms = 0
@@ -471,16 +535,29 @@ class KinematicAnalyzer:
             ground_contact_ratio = avg_ground_contact_ms / total_time
             flight_ratio = avg_flight_ms / total_time
         else:
-            ground_contact_ratio = 0.5
-            flight_ratio = 0.5
+            # 使用默认比例（跑步典型值）
+            ground_contact_ratio = 0.45
+            flight_ratio = 0.35
 
-        transition_ratio = 0  # 过渡期合并到其他阶段
+        # 过渡期比例（从相位检测中计算）
+        phases = self._detect_gait_phases(keypoints_sequence, fps)
+        if phases:
+            transition_count = sum(1 for p in phases if p == self.PHASE_TRANSITION)
+            transition_ratio = transition_count / len(phases)
+            # 重新归一化
+            total = ground_contact_ratio + flight_ratio + transition_ratio
+            if total > 0:
+                ground_contact_ratio /= total
+                flight_ratio /= total
+                transition_ratio /= total
+        else:
+            transition_ratio = 0.20
 
         return {
             'phase_distribution': {
-                'ground_contact': float(ground_contact_ratio),
-                'flight': float(flight_ratio),
-                'transition': float(transition_ratio),
+                'ground_contact': float(round(ground_contact_ratio, 3)),
+                'flight': float(round(flight_ratio, 3)),
+                'transition': float(round(transition_ratio, 3)),
             },
             # 各阶段时间（毫秒）
             'phase_duration_ms': {
@@ -499,9 +576,18 @@ class KinematicAnalyzer:
 
     def _detect_ground_contacts_improved(self, keypoints_sequence: List[Dict], fps: float) -> Tuple[List[Dict], List[Dict]]:
         """
-        改进的触地检测算法
-        基于脚踝Y坐标变化和速度分析
+        改进的触地检测算法（重写版）
+
+        核心改进：
+        1. 使用自适应阈值（基于数据分布）
+        2. 基于速度变化检测触地/离地时刻
+        3. 分别检测左右脚，支持精英跑者的快速步频
+        4. 帧率自适应
+
+        预期触地时间：160-250ms（精英到普通跑者）
         """
+        n_frames = len(keypoints_sequence)
+
         # 提取左右脚踝Y坐标
         left_ankle_y = []
         right_ankle_y = []
@@ -519,76 +605,126 @@ class KinematicAnalyzer:
         left_ankle_y = self._interpolate_nans(np.array(left_ankle_y))
         right_ankle_y = self._interpolate_nans(np.array(right_ankle_y))
 
-        # 平滑处理
+        # 平滑处理（轻度平滑，保留细节）
         if len(left_ankle_y) > 5:
-            left_ankle_y = self._smooth_signal_advanced(left_ankle_y)
-            right_ankle_y = self._smooth_signal_advanced(right_ankle_y)
+            # 使用较小的平滑窗口
+            window = min(5, len(left_ankle_y) // 2)
+            if window % 2 == 0:
+                window -= 1
+            if window >= 3:
+                left_ankle_y = savgol_filter(left_ankle_y, window, 2)
+                right_ankle_y = savgol_filter(right_ankle_y, window, 2)
 
-        # 检测触地点（Y坐标峰值，因为Y轴向下）
-        min_distance = max(int(fps * 0.2), 5)  # 最小200ms间隔
-        prominence = 0.005  # 降低阈值提高敏感度
+        # 帧率自适应参数
+        frame_duration_ms = 1000.0 / fps
+        min_gc_frames = max(2, int(160 / frame_duration_ms))  # 最小触地帧数（160ms）
+        max_gc_frames = int(350 / frame_duration_ms)  # 最大触地帧数（350ms）
+        min_peak_distance = max(3, int(fps * 0.15))  # 最小150ms间隔
 
-        left_peaks, left_props = find_peaks(left_ankle_y, distance=min_distance, prominence=prominence)
-        right_peaks, right_props = find_peaks(right_ankle_y, distance=min_distance, prominence=prominence)
+        # 自适应prominence计算
+        left_range = np.max(left_ankle_y) - np.min(left_ankle_y)
+        right_range = np.max(right_ankle_y) - np.min(right_ankle_y)
+        prominence = min(left_range, right_range) * 0.15  # 范围的15%作为prominence
 
-        # 合并并排序所有触地点
-        all_contacts = []
-        for peak in left_peaks:
-            all_contacts.append({'frame': peak, 'foot': 'left', 'y': left_ankle_y[peak]})
-        for peak in right_peaks:
-            all_contacts.append({'frame': peak, 'foot': 'right', 'y': right_ankle_y[peak]})
+        # 检测左脚触地峰值
+        left_peaks, _ = find_peaks(left_ankle_y, distance=min_peak_distance, prominence=prominence)
+        # 检测右脚触地峰值
+        right_peaks, _ = find_peaks(right_ankle_y, distance=min_peak_distance, prominence=prominence)
 
-        all_contacts.sort(key=lambda x: x['frame'])
-
-        # 计算触地时长
         ground_contacts = []
         flight_phases = []
 
-        for i, contact in enumerate(all_contacts):
-            peak_frame = contact['frame']
-            foot = contact['foot']
-            ankle_y = left_ankle_y if foot == 'left' else right_ankle_y
+        # 处理左脚触地
+        for peak in left_peaks:
+            gc = self._extract_single_ground_contact(
+                left_ankle_y, peak, fps, min_gc_frames, max_gc_frames, 'left'
+            )
+            if gc:
+                ground_contacts.append(gc)
 
-            # 找到触地开始和结束（Y坐标接近峰值的区域）
-            peak_y = ankle_y[peak_frame]
-            threshold = peak_y * 0.98  # 98%的峰值高度
+        # 处理右脚触地
+        for peak in right_peaks:
+            gc = self._extract_single_ground_contact(
+                right_ankle_y, peak, fps, min_gc_frames, max_gc_frames, 'right'
+            )
+            if gc:
+                ground_contacts.append(gc)
 
-            # 向前找触地开始
-            start_frame = peak_frame
-            for j in range(peak_frame - 1, max(0, peak_frame - int(fps * 0.2)), -1):
-                if ankle_y[j] < threshold:
-                    start_frame = j + 1
-                    break
+        # 按时间排序
+        ground_contacts.sort(key=lambda x: x['start_frame'])
 
-            # 向后找触地结束
-            end_frame = peak_frame
-            for j in range(peak_frame + 1, min(len(ankle_y), peak_frame + int(fps * 0.2))):
-                if ankle_y[j] < threshold:
-                    end_frame = j
-                    break
+        # 计算腾空时间（相邻触地之间）
+        for i in range(len(ground_contacts) - 1):
+            current_end = ground_contacts[i]['end_frame']
+            next_start = ground_contacts[i + 1]['start_frame']
+            flight_duration = next_start - current_end
 
-            duration_frames = end_frame - start_frame
-            if duration_frames > 2:  # 至少3帧
-                ground_contacts.append({
-                    'start_frame': start_frame,
-                    'end_frame': end_frame,
-                    'peak_frame': peak_frame,
-                    'duration_frames': duration_frames,
-                    'foot': foot
+            if flight_duration >= 2:  # 至少2帧
+                flight_phases.append({
+                    'start_frame': current_end,
+                    'end_frame': next_start,
+                    'duration_frames': flight_duration
                 })
 
-            # 计算腾空时间（到下一个触地点）
-            if i < len(all_contacts) - 1:
-                next_contact = all_contacts[i + 1]
-                flight_duration = next_contact['frame'] - end_frame
-                if flight_duration > 2:
-                    flight_phases.append({
-                        'start_frame': end_frame,
-                        'end_frame': next_contact['frame'],
-                        'duration_frames': flight_duration
-                    })
-
         return ground_contacts, flight_phases
+
+    def _extract_single_ground_contact(self, ankle_y: np.ndarray, peak_frame: int,
+                                        fps: float, min_frames: int, max_frames: int,
+                                        foot: str) -> Optional[Dict]:
+        """
+        提取单次触地的起止帧
+
+        使用速度过零点检测触地开始和结束
+        """
+        n = len(ankle_y)
+        peak_y = ankle_y[peak_frame]
+
+        # 计算速度
+        velocity = np.gradient(ankle_y)
+
+        # 方法1：使用速度符号变化检测
+        # 触地开始：速度从正变负或接近零（脚下降到触地）
+        # 触地结束：速度从负变正（脚开始抬起）
+
+        # 向前找触地开始（速度从正变为接近零的位置）
+        start_frame = peak_frame
+        search_start = max(0, peak_frame - max_frames)
+        for j in range(peak_frame - 1, search_start, -1):
+            # 当Y值明显低于峰值时，认为还没触地
+            if ankle_y[j] < peak_y - (peak_y - np.min(ankle_y)) * 0.3:
+                start_frame = j + 1
+                break
+            # 或者速度方向改变
+            if j > 0 and velocity[j] > 0 and velocity[j-1] <= 0:
+                start_frame = j
+                break
+
+        # 向后找触地结束
+        end_frame = peak_frame
+        search_end = min(n, peak_frame + max_frames)
+        for j in range(peak_frame + 1, search_end):
+            # 当Y值明显低于峰值时，认为已离地
+            if ankle_y[j] < peak_y - (peak_y - np.min(ankle_y)) * 0.3:
+                end_frame = j
+                break
+            # 或者速度方向改变（开始上升）
+            if j < n - 1 and velocity[j] < 0 and velocity[j+1] >= 0:
+                end_frame = j + 1
+                break
+
+        duration_frames = end_frame - start_frame
+
+        # 验证触地时长合理性
+        if min_frames <= duration_frames <= max_frames:
+            return {
+                'start_frame': start_frame,
+                'end_frame': end_frame,
+                'peak_frame': peak_frame,
+                'duration_frames': duration_frames,
+                'foot': foot
+            }
+
+        return None
 
     def _rate_gait_timing(self, ground_contact_ms: float) -> Dict:
         """

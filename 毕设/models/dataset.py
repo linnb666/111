@@ -390,18 +390,82 @@ class RunningDataset(Dataset):
         return dataset
 
     def _generate_random_params(self) -> RunningParameters:
-        """生成随机跑步参数"""
-        # 参数范围基于真实跑步数据
-        return RunningParameters(
-            cadence=np.random.uniform(160, 200),  # 160-200步/分
-            stride_length=np.random.uniform(0.8, 1.3),
-            vertical_oscillation=np.random.uniform(0.03, 0.12),  # 3-12%躯干长度
-            trunk_lean=np.random.uniform(5, 20),  # 5-20度
-            arm_swing=np.random.uniform(0.1, 0.3),
-            ground_contact_time=np.random.uniform(0.2, 0.4),
-            asymmetry=np.random.uniform(0, 0.1),
-            noise_level=np.random.uniform(0.005, 0.02)
+        """
+        生成随机跑步参数（优化版：增加多样性）
+
+        跑者类型分布：
+        - 精英跑者 (20%): 高步频、短触地、低振幅
+        - 优秀跑者 (25%): 较高步频、较短触地
+        - 良好跑者 (25%): 中等参数
+        - 一般跑者 (20%): 较低步频、较长触地
+        - 较差跑者 (10%): 低步频、长触地、高振幅
+        """
+        # 随机选择跑者类型
+        runner_type = np.random.choice(
+            ['elite', 'excellent', 'good', 'fair', 'poor'],
+            p=[0.20, 0.25, 0.25, 0.20, 0.10]
         )
+
+        if runner_type == 'elite':
+            # 精英跑者
+            return RunningParameters(
+                cadence=np.random.uniform(185, 210),
+                stride_length=np.random.uniform(1.1, 1.4),
+                vertical_oscillation=np.random.uniform(0.03, 0.06),
+                trunk_lean=np.random.uniform(8, 15),
+                arm_swing=np.random.uniform(0.15, 0.25),
+                ground_contact_time=np.random.uniform(0.16, 0.22),
+                asymmetry=np.random.uniform(0, 0.03),
+                noise_level=np.random.uniform(0.003, 0.01)
+            )
+        elif runner_type == 'excellent':
+            # 优秀跑者
+            return RunningParameters(
+                cadence=np.random.uniform(175, 190),
+                stride_length=np.random.uniform(1.0, 1.3),
+                vertical_oscillation=np.random.uniform(0.05, 0.08),
+                trunk_lean=np.random.uniform(6, 16),
+                arm_swing=np.random.uniform(0.12, 0.28),
+                ground_contact_time=np.random.uniform(0.20, 0.26),
+                asymmetry=np.random.uniform(0, 0.05),
+                noise_level=np.random.uniform(0.005, 0.015)
+            )
+        elif runner_type == 'good':
+            # 良好跑者
+            return RunningParameters(
+                cadence=np.random.uniform(165, 180),
+                stride_length=np.random.uniform(0.9, 1.2),
+                vertical_oscillation=np.random.uniform(0.06, 0.10),
+                trunk_lean=np.random.uniform(5, 18),
+                arm_swing=np.random.uniform(0.10, 0.30),
+                ground_contact_time=np.random.uniform(0.24, 0.30),
+                asymmetry=np.random.uniform(0, 0.08),
+                noise_level=np.random.uniform(0.008, 0.018)
+            )
+        elif runner_type == 'fair':
+            # 一般跑者
+            return RunningParameters(
+                cadence=np.random.uniform(155, 170),
+                stride_length=np.random.uniform(0.8, 1.1),
+                vertical_oscillation=np.random.uniform(0.08, 0.14),
+                trunk_lean=np.random.uniform(3, 20),
+                arm_swing=np.random.uniform(0.08, 0.32),
+                ground_contact_time=np.random.uniform(0.27, 0.35),
+                asymmetry=np.random.uniform(0.02, 0.12),
+                noise_level=np.random.uniform(0.010, 0.022)
+            )
+        else:  # poor
+            # 较差跑者
+            return RunningParameters(
+                cadence=np.random.uniform(140, 160),
+                stride_length=np.random.uniform(0.7, 1.0),
+                vertical_oscillation=np.random.uniform(0.12, 0.20),
+                trunk_lean=np.random.uniform(0, 25),
+                arm_swing=np.random.uniform(0.05, 0.35),
+                ground_contact_time=np.random.uniform(0.30, 0.45),
+                asymmetry=np.random.uniform(0.05, 0.18),
+                noise_level=np.random.uniform(0.015, 0.030)
+            )
 
     def _generate_sample(self, view: str, params: RunningParameters) -> Dict:
         """生成单个样本"""
@@ -436,48 +500,94 @@ class RunningDataset(Dataset):
 
     def _calculate_quality_scores(self, params: RunningParameters) -> List[float]:
         """
-        根据参数计算质量评分
+        根据参数计算质量评分（优化版：更大区分度）
 
         Returns:
             [总分, 稳定性, 效率, 跑姿, 节奏]
         """
-        # 稳定性评分（垂直振幅越小越好）
+        # 1. 稳定性评分（基于垂直振幅和不对称性）
+        # 精英：<6%, 优秀：6-8%, 良好：8-10%, 一般：10-14%, 较差：>14%
         if params.vertical_oscillation < 0.06:
-            stability = 90 + np.random.uniform(-5, 5)
+            stability = 92 + np.random.uniform(-3, 5)
+        elif params.vertical_oscillation < 0.08:
+            stability = 82 + np.random.uniform(-4, 4)
         elif params.vertical_oscillation < 0.10:
-            stability = 75 + np.random.uniform(-5, 5)
+            stability = 72 + np.random.uniform(-5, 5)
+        elif params.vertical_oscillation < 0.14:
+            stability = 58 + np.random.uniform(-6, 6)
         else:
-            stability = 60 + np.random.uniform(-10, 5)
+            stability = 42 + np.random.uniform(-8, 5)
 
-        # 效率评分（步频180-190最优）
-        cadence_diff = abs(params.cadence - 185)
-        if cadence_diff < 5:
-            efficiency = 90 + np.random.uniform(-5, 5)
-        elif cadence_diff < 15:
-            efficiency = 75 + np.random.uniform(-5, 5)
+        # 不对称性惩罚
+        stability -= params.asymmetry * 80
+
+        # 2. 效率评分（基于步频和触地时间）
+        # 步频评分：精英185+, 优秀175-185, 良好165-175, 一般155-165, 较差<155
+        if params.cadence >= 185:
+            cadence_score = 95
+        elif params.cadence >= 175:
+            cadence_score = 83
+        elif params.cadence >= 165:
+            cadence_score = 70
+        elif params.cadence >= 155:
+            cadence_score = 55
         else:
-            efficiency = 60 + np.random.uniform(-10, 5)
+            cadence_score = 38
 
-        # 跑姿评分（躯干前倾8-15度最优）
-        lean_diff = abs(params.trunk_lean - 12)
+        # 触地时间评分：精英<0.22, 优秀0.22-0.26, 良好0.26-0.30, 一般0.30-0.35
+        gc_time = params.ground_contact_time
+        if gc_time < 0.22:
+            gc_score = 95
+        elif gc_time < 0.26:
+            gc_score = 82
+        elif gc_time < 0.30:
+            gc_score = 68
+        elif gc_time < 0.35:
+            gc_score = 52
+        else:
+            gc_score = 35
+
+        efficiency = (cadence_score * 0.6 + gc_score * 0.4) + np.random.uniform(-4, 4)
+
+        # 3. 跑姿评分（躯干前倾和手臂摆动）
+        # 最优前倾：8-15度
+        lean_diff = abs(params.trunk_lean - 11)
         if lean_diff < 4:
-            form = 90 + np.random.uniform(-5, 5)
-        elif lean_diff < 8:
-            form = 75 + np.random.uniform(-5, 5)
+            lean_score = 92
+        elif lean_diff < 7:
+            lean_score = 78
+        elif lean_diff < 10:
+            lean_score = 62
         else:
-            form = 60 + np.random.uniform(-10, 5)
+            lean_score = 45
 
-        # 节奏评分（对称性）
-        rhythm = 90 - params.asymmetry * 200 + np.random.uniform(-5, 5)
+        # 手臂摆动评分
+        if 0.15 <= params.arm_swing <= 0.25:
+            arm_score = 90
+        elif 0.10 <= params.arm_swing <= 0.30:
+            arm_score = 75
+        else:
+            arm_score = 55
 
-        # 限制范围
-        stability = np.clip(stability, 40, 100)
-        efficiency = np.clip(efficiency, 40, 100)
-        form = np.clip(form, 40, 100)
-        rhythm = np.clip(rhythm, 40, 100)
+        form = (lean_score * 0.7 + arm_score * 0.3) + np.random.uniform(-4, 4)
+
+        # 4. 节奏评分（对称性和步长一致性）
+        # 对称性越高越好
+        rhythm = 95 - params.asymmetry * 300 + np.random.uniform(-5, 5)
+
+        # 限制范围并增加变化
+        stability = np.clip(stability, 25, 100)
+        efficiency = np.clip(efficiency, 25, 100)
+        form = np.clip(form, 25, 100)
+        rhythm = np.clip(rhythm, 25, 100)
 
         # 总分（加权平均）
-        total = stability * 0.3 + efficiency * 0.3 + form * 0.2 + rhythm * 0.2
+        total = (
+            stability * 0.25 +
+            efficiency * 0.30 +
+            form * 0.25 +
+            rhythm * 0.20
+        )
 
         return [total, stability, efficiency, form, rhythm]
 

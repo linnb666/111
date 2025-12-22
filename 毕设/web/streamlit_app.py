@@ -181,11 +181,16 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
             view_angle=detected_view
         )
 
-        # 5. 深度学习分析
+        # 5. 深度学习分析（注入运动学特征）
         status_text.text("5️⃣ 深度学习分析中...")
         progress_bar.progress(70)
         temporal_analyzer = TemporalModelAnalyzer()
-        temporal_results = temporal_analyzer.analyze(keypoints_sequence)
+        # 传入运动学结果用于特征注入（策略C）
+        temporal_results = temporal_analyzer.analyze(
+            keypoints_sequence,
+            view_angle=detected_view,
+            kinematic_results=kinematic_results
+        )
 
         # 6. 质量评价
         status_text.text("6️⃣ 技术质量评价中...")
@@ -548,15 +553,71 @@ def display_results(quality, kinematic, temporal, local_report, view_angle='side
     st.subheader("🤖 AI智能分析（可选）")
     st.info("点击下方按钮使用智谱AI大模型对数据进行深度分析和总结建议。")
 
-    if st.button("🚀 启动AI智能分析", type="secondary"):
+    if st.button("🚀 启动AI智能分析", type="secondary", key="ai_analysis_btn"):
         if results_for_ai:
-            with st.spinner("正在调用智谱AI进行深度分析..."):
-                try:
-                    ai_response = components['ai'].generate_analysis_report(results_for_ai)
-                    st.subheader("🧠 AI深度分析结果")
-                    st.markdown(ai_response)
-                except Exception as e:
-                    st.error(f"AI分析失败: {e}")
+            # 保存结果到session_state以供弹窗使用
+            st.session_state['ai_analysis_data'] = results_for_ai
+            st.session_state['show_ai_dialog'] = True
+
+    # 显示AI分析弹窗
+    if st.session_state.get('show_ai_dialog', False):
+        show_ai_analysis_dialog()
+
+
+@st.dialog("🧠 AI深度分析", width="large")
+def show_ai_analysis_dialog():
+    """AI分析结果弹窗"""
+    results_for_ai = st.session_state.get('ai_analysis_data', None)
+
+    if not results_for_ai:
+        st.error("没有可用的分析数据")
+        if st.button("关闭", key="close_ai_dialog_error"):
+            st.session_state['show_ai_dialog'] = False
+            st.rerun()
+        return
+
+    # 显示加载状态或结果
+    if 'ai_analysis_result' not in st.session_state:
+        with st.spinner("正在调用智谱AI进行深度分析..."):
+            try:
+                ai_response = components['ai'].generate_analysis_report(results_for_ai)
+                st.session_state['ai_analysis_result'] = ai_response
+                st.session_state['ai_analysis_success'] = True
+            except Exception as e:
+                st.session_state['ai_analysis_result'] = str(e)
+                st.session_state['ai_analysis_success'] = False
+
+    # 显示结果
+    if st.session_state.get('ai_analysis_success', False):
+        st.markdown("### 📊 分析报告")
+        st.markdown(st.session_state['ai_analysis_result'])
+
+        st.markdown("---")
+        st.caption("由智谱AI (GLM-4) 生成")
+    else:
+        st.error(f"AI分析失败: {st.session_state.get('ai_analysis_result', '未知错误')}")
+
+    # 关闭按钮
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("🔄 重新分析", key="retry_ai_analysis", type="secondary"):
+            # 清除之前的结果
+            if 'ai_analysis_result' in st.session_state:
+                del st.session_state['ai_analysis_result']
+            if 'ai_analysis_success' in st.session_state:
+                del st.session_state['ai_analysis_success']
+            st.rerun()
+    with col2:
+        if st.button("关闭", key="close_ai_dialog", type="primary"):
+            # 清理session_state
+            st.session_state['show_ai_dialog'] = False
+            if 'ai_analysis_result' in st.session_state:
+                del st.session_state['ai_analysis_result']
+            if 'ai_analysis_success' in st.session_state:
+                del st.session_state['ai_analysis_success']
+            if 'ai_analysis_data' in st.session_state:
+                del st.session_state['ai_analysis_data']
+            st.rerun()
 
 
 def history_page():

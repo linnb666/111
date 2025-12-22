@@ -27,6 +27,8 @@ class TemporalModelAnalyzer:
     - legacy: 原有LSTM+CNN模型
     - transformer: 新的Transformer阶段分类模型
     - joint: 联合阶段分类和质量评估模型
+
+    策略C优化：运动学特征注入 + 动态评分调整
     """
 
     # 视角ID映射
@@ -45,6 +47,9 @@ class TemporalModelAnalyzer:
         """
         self.model_type = model_type
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+
+        # 运动学特征存储（用于特征注入）
+        self.kinematic_features = None
 
         # 加载模型
         self._load_models()
@@ -161,18 +166,33 @@ class TemporalModelAnalyzer:
         self.phase_model.eval()
         self.quality_model.eval()
 
+    def set_kinematic_features(self, kinematic_results: Dict):
+        """
+        设置运动学特征（用于特征注入）
+
+        Args:
+            kinematic_results: 来自KinematicAnalyzer的分析结果
+        """
+        self.kinematic_features = kinematic_results
+
     def analyze(self, keypoints_sequence: List[Dict],
-                view_angle: str = 'side') -> Dict:
+                view_angle: str = 'side',
+                kinematic_results: Dict = None) -> Dict:
         """
         分析关键点序列
 
         Args:
             keypoints_sequence: 关键点时间序列
             view_angle: 视角类型 ('side', 'front', 'back', 'mixed')
+            kinematic_results: 可选的运动学分析结果（用于特征注入）
 
         Returns:
             分析结果字典
         """
+        # 保存运动学特征
+        if kinematic_results:
+            self.kinematic_features = kinematic_results
+
         # 准备输入数据
         input_tensor = self._prepare_input(keypoints_sequence)
 
@@ -192,7 +212,194 @@ class TemporalModelAnalyzer:
             else:  # legacy
                 results = self._analyze_legacy(input_tensor)
 
+        # 策略C：运动学特征注入 - 动态调整评分
+        results = self._apply_kinematic_adjustment(results)
+
         return results
+
+    def _apply_kinematic_adjustment(self, results: Dict) -> Dict:
+        """
+        应用运动学特征注入，动态调整深度学习评分
+
+        策略：DL原始评分 * 0.4 + 运动学评分 * 0.6
+        这样既保留了深度学习的特征提取能力，又引入了可靠的规则修正
+        """
+        if not self.kinematic_features:
+            return results
+
+        # 提取运动学指标
+        kinematic = self.kinematic_features
+
+        # 计算运动学评分组件
+        kinematic_scores = self._calculate_kinematic_scores(kinematic)
+
+        # 融合权重
+        dl_weight = 0.4  # 深度学习权重
+        kinematic_weight = 0.6  # 运动学权重
+
+        # 调整各维度评分
+        original_quality = results.get('quality_score', 50)
+        original_stability = results.get('quality_stability', 50)
+        original_efficiency = results.get('quality_efficiency', 50)
+        original_form = results.get('quality_form', 50)
+        original_rhythm = results.get('quality_rhythm', 50)
+
+        # 融合评分
+        results['quality_score'] = float(
+            original_quality * dl_weight +
+            kinematic_scores['overall'] * kinematic_weight
+        )
+        results['quality_stability'] = float(
+            original_stability * dl_weight +
+            kinematic_scores['stability'] * kinematic_weight
+        )
+        results['quality_efficiency'] = float(
+            original_efficiency * dl_weight +
+            kinematic_scores['efficiency'] * kinematic_weight
+        )
+        results['quality_form'] = float(
+            original_form * dl_weight +
+            kinematic_scores['form'] * kinematic_weight
+        )
+        results['quality_rhythm'] = float(
+            original_rhythm * dl_weight +
+            kinematic_scores['rhythm'] * kinematic_weight
+        )
+
+        # 添加调整标记
+        results['kinematic_adjusted'] = True
+        results['kinematic_scores'] = kinematic_scores
+
+        return results
+
+    def _calculate_kinematic_scores(self, kinematic: Dict) -> Dict:
+        """
+        根据运动学特征计算评分
+
+        评分规则基于专业跑步标准
+        """
+        scores = {
+            'stability': 50.0,
+            'efficiency': 50.0,
+            'form': 50.0,
+            'rhythm': 50.0,
+            'overall': 50.0
+        }
+
+        # 1. 稳定性评分
+        stability = kinematic.get('stability', {})
+        if isinstance(stability, dict):
+            stability_overall = stability.get('overall', 50)
+            scores['stability'] = float(np.clip(stability_overall, 30, 100))
+
+        # 2. 效率评分（基于步频和垂直振幅）
+        efficiency_score = 50.0
+
+        # 步频评分
+        cadence_data = kinematic.get('cadence', {})
+        if isinstance(cadence_data, dict):
+            cadence = cadence_data.get('cadence', 0)
+            if cadence > 0:
+                # 精英：185+, 优秀：175-185, 良好：165-175, 一般：155-165, 较差：<155
+                if cadence >= 185:
+                    cadence_score = 95
+                elif cadence >= 175:
+                    cadence_score = 85
+                elif cadence >= 165:
+                    cadence_score = 72
+                elif cadence >= 155:
+                    cadence_score = 58
+                else:
+                    cadence_score = 40
+                efficiency_score = cadence_score * 0.5
+
+        # 垂直振幅评分
+        vertical = kinematic.get('vertical_motion', {})
+        if isinstance(vertical, dict):
+            amplitude = vertical.get('amplitude_normalized', 0)
+            if amplitude > 0:
+                # 优秀：3-6%, 良好：6-10%, 一般：10-15%, 较差：>15%
+                if 3 <= amplitude <= 6:
+                    amp_score = 95
+                elif amplitude < 3:
+                    amp_score = 75
+                elif amplitude <= 10:
+                    amp_score = 78
+                elif amplitude <= 15:
+                    amp_score = 55
+                else:
+                    amp_score = 35
+                efficiency_score += amp_score * 0.5
+
+        scores['efficiency'] = efficiency_score
+
+        # 3. 跑姿评分（基于膝关节角度和躯干前倾）
+        form_score = 50.0
+
+        # 膝关节角度
+        angles = kinematic.get('angles', {})
+        if isinstance(angles, dict):
+            phase_analysis = angles.get('phase_analysis', {})
+            if phase_analysis:
+                gc_angle = phase_analysis.get('ground_contact', {}).get('mean', 0)
+                if gc_angle > 0:
+                    # 理想触地角度：155-170度
+                    if 155 <= gc_angle <= 170:
+                        knee_score = 95
+                    elif 145 <= gc_angle < 155 or 170 < gc_angle <= 180:
+                        knee_score = 75
+                    else:
+                        knee_score = 50
+                    form_score = knee_score * 0.5
+
+        # 躯干前倾
+        body_lean = kinematic.get('body_lean', {})
+        if isinstance(body_lean, dict):
+            forward_lean = body_lean.get('forward_lean', 0)
+            if forward_lean > 0:
+                # 理想前倾：5-15度
+                if 5 <= forward_lean <= 15:
+                    lean_score = 95
+                elif 3 <= forward_lean < 5 or 15 < forward_lean <= 20:
+                    lean_score = 75
+                else:
+                    lean_score = 50
+                form_score += lean_score * 0.5
+
+        scores['form'] = form_score
+
+        # 4. 节奏评分（基于触地时间和相位分布）
+        rhythm_score = 50.0
+
+        gait_cycle = kinematic.get('gait_cycle', {})
+        if isinstance(gait_cycle, dict):
+            phase_duration = gait_cycle.get('phase_duration_ms', {})
+            gc_time = phase_duration.get('ground_contact', 0)
+            if gc_time > 0:
+                # 精英：<210ms, 优秀：210-240ms, 良好：240-270ms, 一般：270-300ms
+                if gc_time < 210:
+                    gc_score = 98
+                elif gc_time < 240:
+                    gc_score = 85
+                elif gc_time < 270:
+                    gc_score = 70
+                elif gc_time < 300:
+                    gc_score = 55
+                else:
+                    gc_score = 40
+                rhythm_score = gc_score
+
+        scores['rhythm'] = rhythm_score
+
+        # 5. 综合评分
+        scores['overall'] = (
+            scores['stability'] * 0.25 +
+            scores['efficiency'] * 0.30 +
+            scores['form'] * 0.25 +
+            scores['rhythm'] * 0.20
+        )
+
+        return scores
 
     def _analyze_joint(self, input_tensor: torch.Tensor,
                        view_id: torch.Tensor) -> Dict:
