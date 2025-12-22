@@ -76,13 +76,19 @@ def video_analysis_page():
     """视频分析页面"""
     st.header("📹 视频分析")
 
+    # 检查是否有已完成的分析结果（用于保持页面状态）
+    if st.session_state.get('analysis_complete', False):
+        # 显示已保存的结果
+        _display_saved_results()
+        return
+
     # 视角选择（必须手动选择）
     st.info("📐 请根据您的视频拍摄角度选择正确的视角")
     view_angle = st.radio(
         "选择视频拍摄视角",
         ["侧面视角", "正面视角"],
         horizontal=True,
-        help="侧面视角：从跑者侧面拍摄，适合分析膝关节角度、垂直振幅、躯干前倾。\n正面视角：从跑者正前方拍摄，适合分析左右对称性、下肢力线。"
+        help="侧面视角：从跑者侧面拍摄，适合分析膝关节角度、垂直振幅、躯干前倾。\n正面视角：从跑者正前方拍摄，适合分析下肢力线。"
     )
 
     selected_view = "side" if view_angle == "侧面视角" else "front"
@@ -108,6 +114,55 @@ def video_analysis_page():
             analyze_video(video_path, selected_view)
 
 
+def _display_saved_results():
+    """显示已保存的分析结果"""
+    saved = st.session_state.get('saved_analysis_results', {})
+    if not saved:
+        st.session_state['analysis_complete'] = False
+        st.rerun()
+        return
+
+    # 新分析按钮
+    if st.button("📹 分析新视频", type="secondary"):
+        # 清除所有分析相关的session状态
+        for key in ['analysis_complete', 'saved_analysis_results', 'ai_analysis_data',
+                    'show_ai_dialog', 'ai_analysis_result', 'ai_analysis_success']:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
+        return
+
+    # 显示保存的视频信息
+    video_info = saved.get('video_info', {})
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("分辨率", f"{video_info.get('width', 0)}x{video_info.get('height', 0)}")
+    col2.metric("帧率", f"{video_info.get('fps', 0):.1f} FPS")
+    col3.metric("时长", f"{video_info.get('duration', 0):.1f} 秒")
+    col4.metric("提取帧数", f"{saved.get('frame_count', 0)}")
+
+    # 显示关键帧（如果有）
+    keyframe_data = saved.get('keyframe_data', [])
+    if keyframe_data:
+        st.subheader("🖼️ 关键帧姿态分析")
+        for row_start in range(0, len(keyframe_data), 3):
+            cols = st.columns(3)
+            for i, kf in enumerate(keyframe_data[row_start:row_start+3]):
+                with cols[i]:
+                    st.image(kf['path'], caption=f"时间: {kf['time_sec']:.2f}s",
+                             use_container_width=True)
+
+    # 显示分析结果
+    st.markdown("---")
+    display_results(
+        saved['quality_results'],
+        saved['kinematic_results'],
+        saved['temporal_results'],
+        saved['local_report'],
+        saved['detected_view'],
+        saved['results_for_ai']
+    )
+
+
 def analyze_video(video_path: str, selected_view: str = 'side'):
     """执行视频分析"""
     try:
@@ -120,7 +175,30 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
         progress_bar.progress(5)
         processor = VideoProcessor(video_path)
         video_info = processor.get_video_info()
-        frames, fps = processor.extract_frames(target_fps=30, max_frames=300)
+
+        # 计算中间10秒的帧提取参数
+        video_duration = video_info['duration']
+        video_fps = video_info['fps']
+        target_duration = min(10.0, video_duration)  # 最多10秒，不足10秒则取全部
+
+        if video_duration > 10.0:
+            # 计算中间段的起始时间
+            start_time = (video_duration - target_duration) / 2
+            # 计算需要跳过的帧数和提取的帧数
+            start_frame = int(start_time * video_fps)
+            max_frames = int(target_duration * 30)  # 按30fps目标帧率计算
+            st.info(f"📍 视频时长 {video_duration:.1f}s，提取中间 {target_duration:.0f} 秒进行分析 (从 {start_time:.1f}s 开始)")
+        else:
+            start_frame = 0
+            max_frames = int(video_duration * 30)
+            st.info(f"📍 视频时长 {video_duration:.1f}s，分析完整视频")
+
+        # 提取帧（从指定位置开始）
+        frames, fps = processor.extract_frames_from_position(
+            start_frame=start_frame,
+            target_fps=30,
+            max_frames=max_frames
+        )
 
         # 显示视频信息
         col1, col2, col3, col4 = st.columns(4)
@@ -217,10 +295,6 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
         progress_bar.progress(100)
         status_text.text("✅ 分析完成!")
 
-        # 显示结果
-        st.markdown("---")
-        display_results(quality_results, kinematic_results, temporal_results, local_report, detected_view, results_for_report)
-
         # 保存到数据库
         complete_results = {
             'video_info': video_info,
@@ -231,11 +305,28 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
             'view_angle': detected_view
         }
         record_id = components['db'].save_analysis(complete_results)
-        st.success(f"分析结果已保存 (ID: {record_id})")
 
         # 清理资源
         processor.release()
         estimator.close()
+
+        # 保存分析结果到session_state（用于AI分析按钮）
+        st.session_state['saved_analysis_results'] = {
+            'video_info': video_info,
+            'frame_count': len(frames),
+            'quality_results': quality_results,
+            'kinematic_results': kinematic_results,
+            'temporal_results': temporal_results,
+            'local_report': local_report,
+            'detected_view': detected_view,
+            'results_for_ai': results_for_report,
+            'keyframe_data': keyframe_data if keyframe_data else [],
+            'record_id': record_id
+        }
+        st.session_state['analysis_complete'] = True
+
+        # 重新运行以显示结果（使用保存的状态）
+        st.rerun()
 
     except Exception as e:
         st.error(f"分析过程出错: {e}")
@@ -256,7 +347,7 @@ def get_strategy_name(view: str) -> str:
     """获取分析策略名称"""
     strategies = {
         'side': '膝角+振幅+躯干前倾',
-        'front': '对称性+下肢力线+肩部晃动'
+        'front': '下肢力线+横向稳定+肩部晃动'
     }
     return strategies.get(view, '标准分析')
 
@@ -553,14 +644,12 @@ def display_results(quality, kinematic, temporal, local_report, view_angle='side
     st.subheader("🤖 AI智能分析（可选）")
     st.info("点击下方按钮使用智谱AI大模型对数据进行深度分析和总结建议。")
 
-    if st.button("🚀 启动AI智能分析", type="secondary", key="ai_analysis_btn"):
-        if results_for_ai:
-            # 保存结果到session_state以供弹窗使用
-            st.session_state['ai_analysis_data'] = results_for_ai
-            st.session_state['show_ai_dialog'] = True
+    # 保存数据到session_state供弹窗使用
+    if results_for_ai:
+        st.session_state['ai_analysis_data'] = results_for_ai
 
-    # 显示AI分析弹窗
-    if st.session_state.get('show_ai_dialog', False):
+    # 使用Streamlit的dialog装饰器需要直接调用
+    if st.button("🚀 启动AI智能分析", type="secondary", key="ai_analysis_btn"):
         show_ai_analysis_dialog()
 
 
@@ -571,53 +660,19 @@ def show_ai_analysis_dialog():
 
     if not results_for_ai:
         st.error("没有可用的分析数据")
-        if st.button("关闭", key="close_ai_dialog_error"):
-            st.session_state['show_ai_dialog'] = False
-            st.rerun()
         return
 
-    # 显示加载状态或结果
-    if 'ai_analysis_result' not in st.session_state:
-        with st.spinner("正在调用智谱AI进行深度分析..."):
-            try:
-                ai_response = components['ai'].generate_analysis_report(results_for_ai)
-                st.session_state['ai_analysis_result'] = ai_response
-                st.session_state['ai_analysis_success'] = True
-            except Exception as e:
-                st.session_state['ai_analysis_result'] = str(e)
-                st.session_state['ai_analysis_success'] = False
-
-    # 显示结果
-    if st.session_state.get('ai_analysis_success', False):
-        st.markdown("### 📊 分析报告")
-        st.markdown(st.session_state['ai_analysis_result'])
-
-        st.markdown("---")
-        st.caption("由智谱AI (GLM-4) 生成")
-    else:
-        st.error(f"AI分析失败: {st.session_state.get('ai_analysis_result', '未知错误')}")
-
-    # 关闭按钮
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("🔄 重新分析", key="retry_ai_analysis", type="secondary"):
-            # 清除之前的结果
-            if 'ai_analysis_result' in st.session_state:
-                del st.session_state['ai_analysis_result']
-            if 'ai_analysis_success' in st.session_state:
-                del st.session_state['ai_analysis_success']
-            st.rerun()
-    with col2:
-        if st.button("关闭", key="close_ai_dialog", type="primary"):
-            # 清理session_state
-            st.session_state['show_ai_dialog'] = False
-            if 'ai_analysis_result' in st.session_state:
-                del st.session_state['ai_analysis_result']
-            if 'ai_analysis_success' in st.session_state:
-                del st.session_state['ai_analysis_success']
-            if 'ai_analysis_data' in st.session_state:
-                del st.session_state['ai_analysis_data']
-            st.rerun()
+    # 每次打开弹窗时进行AI分析
+    with st.spinner("正在调用智谱AI进行深度分析..."):
+        try:
+            ai_response = components['ai'].generate_analysis_report(results_for_ai)
+            st.markdown("### 📊 AI分析报告")
+            st.markdown(ai_response)
+            st.markdown("---")
+            st.caption("由智谱AI (GLM-4) 生成")
+        except Exception as e:
+            st.error(f"AI分析失败: {str(e)}")
+            st.info("您可以关闭此窗口后重试，或检查网络连接。")
 
 
 def history_page():

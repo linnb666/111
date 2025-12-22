@@ -63,6 +63,30 @@ class VideoProcessor:
             frames: 帧列表
             actual_fps: 实际帧率
         """
+        return self.extract_frames_from_position(
+            start_frame=0,
+            target_fps=target_fps,
+            resize=resize,
+            max_frames=max_frames
+        )
+
+    def extract_frames_from_position(self,
+                                      start_frame: int = 0,
+                                      target_fps: Optional[int] = None,
+                                      resize: bool = False,
+                                      max_frames: Optional[int] = None) -> Tuple[List[np.ndarray], float]:
+        """
+        从指定位置提取视频帧（用于提取中间段）
+
+        Args:
+            start_frame: 开始帧索引
+            target_fps: 目标帧率（None则使用原始帧率）
+            resize: 是否调整分辨率
+            max_frames: 最大帧数限制
+        Returns:
+            frames: 帧列表
+            actual_fps: 实际帧率
+        """
         frames = []
         original_fps = self.video_info['fps']
 
@@ -74,7 +98,8 @@ class VideoProcessor:
             frame_interval = int(original_fps / target_fps)
             actual_fps = original_fps / frame_interval
 
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # 重置到开始
+        # 设置起始位置
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         frame_idx = 0
 
         while True:

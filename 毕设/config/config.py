@@ -206,15 +206,6 @@ AI_CONFIG = {
             'enabled': True,  # 本地规则引擎始终可用作后备
             'model': 'rule_engine'
         }
-    },
-
-    # 多模态分析配置
-    'multimodal': {
-        'enabled': True,
-        'frame_sample_rate': 10,  # 每10帧采样一帧进行图像分析
-        'max_frames': 6,          # 最多分析6帧
-        'keyframe_mode': 'uniform',  # 关键帧采样模式: 'uniform', 'phase', 'quality'
-        'time_segment_analysis': True  # 启用时间段问题分析
     }
 }
 

@@ -162,15 +162,6 @@ def run_analysis_pipeline(video_path: str, output_dir: Path, visualize: bool = F
                 if phase_data.get('count', 0) > 0:
                     print(f"      {phase_cn}: {phase_data['mean']:.1f}° (范围: {phase_data['min']:.1f}°-{phase_data['max']:.1f}°)")
 
-    # 对称性分析（正面/背面视角）
-    if detected_view in ['front', 'back', 'mixed']:
-        symmetry = kinematic_results.get('symmetry', {})
-        if symmetry:
-            print("   对称性分析:")
-            print(f"      肩部: {symmetry.get('shoulder_symmetry', 0)*100:.1f}%")
-            print(f"      髋部: {symmetry.get('hip_symmetry', 0)*100:.1f}%")
-            print(f"      整体: {symmetry.get('overall_symmetry', 0)*100:.1f}%")
-
     # 可视化角度曲线
     if visualize and 'angles' in kinematic_results:
         print("   生成角度曲线图...")
