@@ -167,7 +167,7 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
                 for i, kf in enumerate(keyframe_data[row_start:row_start+3]):
                     with cols[i]:
                         st.image(kf['path'], caption=f"时间: {kf['time_sec']:.2f}s",
-                                 width=None)  # 使用自适应宽度
+                                 use_container_width=True)  # 使用容器宽度
                         if not kf['detected']:
                             st.caption("⚠️ 未检测到姿态")
 
