@@ -594,25 +594,57 @@ def display_results(quality, kinematic, temporal, local_report, view_angle='side
             with main_cols[2]:
                 st.metric("检测步数", f"{landing_count}")
 
-            st.caption("理想范围：155-170°（接近完全伸直但略有弯曲以缓冲冲击）")
+            st.caption("理想范围：145-175°（中长跑标准，接近完全伸直但略有弯曲以缓冲冲击）")
 
-            # 每步详细统计（可展开）
+            # 显示有效/拒绝统计
+            valid_count = gc.get('valid_count', landing_count)
+            rejected_count = gc.get('rejected_count', 0)
+            if rejected_count > 0:
+                st.info(f"🔍 检测质量：{valid_count}次通过生物力学约束 / {valid_count + rejected_count}次候选落地")
+
+            # 有效落地详细统计（可展开）
             per_step_stats = gc.get('per_step_stats', [])
             if per_step_stats:
-                with st.expander(f"📊 每步详细数据（共{len(per_step_stats)}步）", expanded=False):
+                with st.expander(f"✅ 有效落地数据（共{len(per_step_stats)}步）", expanded=False):
                     import pandas as pd
                     step_data = []
-                    for step in per_step_stats:
+                    for i, step in enumerate(per_step_stats):
+                        # 兼容新旧数据结构
+                        angle = step.get('landing_angle', step.get('max_stable_angle', 0))
                         step_data.append({
-                            '步数': step.get('step_index', 0),
+                            '序号': i + 1,
                             '脚': '左' if step.get('foot') == 'left' else '右',
-                            '膝角(°)': f"{step.get('max_stable_angle', 0):.1f}",
-                            '区间内标准差': f"{step.get('angle_std', 0):.2f}",
-                            '稳定帧数': step.get('stable_frame_count', 0),
+                            '膝角(°)': f"{angle:.1f}",
+                            '置信度': step.get('confidence', '-'),
                             '触地时长(ms)': f"{step.get('duration_ms', 0):.0f}"
                         })
                     df = pd.DataFrame(step_data)
                     st.dataframe(df, use_container_width=True, hide_index=True)
+
+            # 被拒绝的落地（显示原因）
+            rejected_steps = gc.get('rejected_steps', [])
+            if rejected_steps:
+                with st.expander(f"❌ 被拒绝的落地（共{len(rejected_steps)}次）", expanded=False):
+                    import pandas as pd
+                    # 拒绝原因翻译
+                    reason_map = {
+                        'angle_too_low': '膝角过小（摆动期）',
+                        'angle_too_high': '膝角过大',
+                        'flexion_trend': '屈膝趋势（非伸展）',
+                        'no_valid_frames': '无有效帧',
+                        'window_too_small': '窗口过小'
+                    }
+                    reject_data = []
+                    for step in rejected_steps:
+                        reject_data.append({
+                            '脚': '左' if step.get('foot') == 'left' else '右',
+                            '拒绝原因': reason_map.get(step.get('rejection_reason', ''), step.get('rejection_reason', '')),
+                            '实际角度': f"{step.get('actual_angle', 0):.1f}°",
+                            '变化率': f"{step.get('actual_rate', 0):.2f}"
+                        })
+                    df = pd.DataFrame(reject_data)
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                    st.caption("💡 被拒绝的原因：膝角不在145-175°范围内，或处于屈膝趋势（非落地相位）")
 
             # 其他阶段角度（折叠显示）
             with st.expander("其他阶段角度统计", expanded=False):
