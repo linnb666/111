@@ -250,20 +250,8 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
         except Exception as video_err:
             st.warning(f"视频生成失败: {video_err}，将显示关键帧图像")
 
-        # 提取并显示关键帧（无论视频是否成功都显示）
+        # 提取关键帧（不在此处显示，在_display_saved_results中显示）
         keyframe_data = extract_keyframes_with_poses(frames, keypoints_sequence, fps, estimator, num_keyframes=6)
-        if keyframe_data:
-            st.subheader("🖼️ 关键帧姿态分析")
-
-            # 每行显示3张关键帧
-            for row_start in range(0, len(keyframe_data), 3):
-                cols = st.columns(3)
-                for i, kf in enumerate(keyframe_data[row_start:row_start+3]):
-                    with cols[i]:
-                        st.image(kf['path'], caption=f"时间: {kf['time_sec']:.2f}s",
-                                 use_container_width=True)  # 使用容器宽度
-                        if not kf['detected']:
-                            st.caption("⚠️ 未检测到姿态")
 
         # 4. 运动学分析（使用自适应分析器）
         status_text.text("4️⃣ 运动学分析中...")

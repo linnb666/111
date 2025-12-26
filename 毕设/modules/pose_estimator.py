@@ -109,11 +109,13 @@ class MediaPipePoseEstimator(BasePoseEstimator):
         self.backend = 'mediapipe'
         self.num_keypoints = 33
 
-    def process_frames(self, frames: List[np.ndarray]) -> List[Dict]:
+    def process_frames(self, frames: List[np.ndarray],
+                       apply_smoothing: bool = True) -> List[Dict]:
         """
         处理视频帧序列
         Args:
             frames: 视频帧列表
+            apply_smoothing: 是否应用时序平滑（减少关键点跳动）
         Returns:
             keypoints_sequence: 关键点时间序列
         """
@@ -124,7 +126,154 @@ class MediaPipePoseEstimator(BasePoseEstimator):
             keypoints['frame_idx'] = idx
             keypoints_sequence.append(keypoints)
 
+        # 应用时序平滑处理
+        if apply_smoothing and len(keypoints_sequence) > 3:
+            keypoints_sequence = self._apply_temporal_smoothing(keypoints_sequence)
+
         return keypoints_sequence
+
+    def _apply_temporal_smoothing(self, keypoints_sequence: List[Dict],
+                                   window_size: int = 3) -> List[Dict]:
+        """
+        应用时序平滑处理，减少关键点的突然跳动
+
+        使用加权移动平均：当前帧权重最高，前后帧权重递减
+        同时检测并修正异常跳动
+        """
+        n_frames = len(keypoints_sequence)
+        if n_frames < window_size:
+            return keypoints_sequence
+
+        # 提取所有帧的关键点坐标
+        num_keypoints = 33  # MediaPipe有33个关键点
+
+        # 为每个关键点创建时间序列
+        x_series = {i: [] for i in range(num_keypoints)}
+        y_series = {i: [] for i in range(num_keypoints)}
+        visibility_series = {i: [] for i in range(num_keypoints)}
+
+        for frame_data in keypoints_sequence:
+            landmarks = frame_data.get('landmarks', [])
+            for i in range(num_keypoints):
+                if i < len(landmarks):
+                    x_series[i].append(landmarks[i]['x_norm'])
+                    y_series[i].append(landmarks[i]['y_norm'])
+                    visibility_series[i].append(landmarks[i]['visibility'])
+                else:
+                    x_series[i].append(0)
+                    y_series[i].append(0)
+                    visibility_series[i].append(0)
+
+        # 对每个关键点应用平滑
+        smoothed_x = {}
+        smoothed_y = {}
+
+        for kp_idx in range(num_keypoints):
+            x_arr = np.array(x_series[kp_idx])
+            y_arr = np.array(y_series[kp_idx])
+            vis_arr = np.array(visibility_series[kp_idx])
+
+            # 检测异常跳动并修正
+            x_arr = self._detect_and_fix_jumps(x_arr, vis_arr)
+            y_arr = self._detect_and_fix_jumps(y_arr, vis_arr)
+
+            # 加权移动平均平滑
+            smoothed_x[kp_idx] = self._weighted_moving_average(x_arr, window_size)
+            smoothed_y[kp_idx] = self._weighted_moving_average(y_arr, window_size)
+
+        # 将平滑后的坐标写回
+        for frame_idx, frame_data in enumerate(keypoints_sequence):
+            landmarks = frame_data.get('landmarks', [])
+            for kp_idx in range(min(len(landmarks), num_keypoints)):
+                # 更新归一化坐标
+                landmarks[kp_idx]['x_norm'] = smoothed_x[kp_idx][frame_idx]
+                landmarks[kp_idx]['y_norm'] = smoothed_y[kp_idx][frame_idx]
+
+                # 同步更新像素坐标（假设图像尺寸不变）
+                if 'x' in landmarks[kp_idx] and frame_idx < len(keypoints_sequence):
+                    # 使用第一帧的尺寸作为参考
+                    first_x = keypoints_sequence[0]['landmarks'][kp_idx].get('x', 0)
+                    first_x_norm = x_series[kp_idx][0]
+                    if first_x_norm > 0:
+                        w = first_x / first_x_norm
+                        h = keypoints_sequence[0]['landmarks'][kp_idx].get('y', 0) / y_series[kp_idx][0] if y_series[kp_idx][0] > 0 else 0
+                        landmarks[kp_idx]['x'] = int(smoothed_x[kp_idx][frame_idx] * w)
+                        landmarks[kp_idx]['y'] = int(smoothed_y[kp_idx][frame_idx] * h)
+
+        return keypoints_sequence
+
+    def _detect_and_fix_jumps(self, values: np.ndarray,
+                               visibility: np.ndarray,
+                               threshold_factor: float = 3.0) -> np.ndarray:
+        """
+        检测并修正异常跳动
+
+        如果某帧的值与前后帧差异过大（超过threshold_factor倍标准差），则用插值替换
+        """
+        if len(values) < 3:
+            return values
+
+        result = values.copy()
+
+        # 计算相邻帧差异
+        diffs = np.abs(np.diff(values))
+        if len(diffs) == 0:
+            return result
+
+        # 使用中位数绝对偏差(MAD)来估计正常变化范围
+        median_diff = np.median(diffs)
+        mad = np.median(np.abs(diffs - median_diff))
+        threshold = median_diff + threshold_factor * max(mad, 0.01)
+
+        # 检测跳动
+        for i in range(1, len(values) - 1):
+            # 只处理可见度高的点
+            if visibility[i] < 0.3:
+                continue
+
+            prev_diff = abs(values[i] - values[i-1])
+            next_diff = abs(values[i] - values[i+1])
+
+            # 如果当前帧与前后帧都差异很大，说明是异常跳动
+            if prev_diff > threshold and next_diff > threshold:
+                # 用前后帧的平均值替换
+                result[i] = (values[i-1] + values[i+1]) / 2
+
+        return result
+
+    def _weighted_moving_average(self, values: np.ndarray,
+                                  window_size: int = 3) -> np.ndarray:
+        """
+        加权移动平均
+
+        权重分布：中心帧权重最高，边缘递减
+        """
+        if len(values) < window_size:
+            return values
+
+        result = np.zeros_like(values)
+
+        # 生成高斯权重
+        half_window = window_size // 2
+        weights = np.array([np.exp(-0.5 * (i / max(half_window, 1))**2)
+                           for i in range(-half_window, half_window + 1)])
+        weights = weights / weights.sum()
+
+        # 应用加权平均
+        for i in range(len(values)):
+            start = max(0, i - half_window)
+            end = min(len(values), i + half_window + 1)
+
+            # 调整权重以适应边界情况
+            local_weights = weights[max(0, half_window - i):min(len(weights), half_window + len(values) - i)]
+            local_weights = local_weights[:end - start]
+            if len(local_weights) > 0:
+                local_weights = local_weights / local_weights.sum()
+                result[i] = np.sum(values[start:end] * local_weights)
+            else:
+                result[i] = values[i]
+
+        return result
 
     def process_single_frame(self, frame: np.ndarray) -> Dict:
         """

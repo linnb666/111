@@ -61,7 +61,7 @@ class ZhipuProvider(BaseAIProvider):
                 model="glm-4.6",
                 messages=messages,
                 temperature=0.6,
-                max_tokens=2000
+                max_tokens=4000  # 增加token限制，避免文本截断
             )
 
             # 提取响应内容
