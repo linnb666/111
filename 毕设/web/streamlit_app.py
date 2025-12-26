@@ -138,7 +138,23 @@ def _display_saved_results():
     col1.metric("分辨率", f"{video_info.get('width', 0)}x{video_info.get('height', 0)}")
     col2.metric("帧率", f"{video_info.get('fps', 0):.1f} FPS")
     col3.metric("时长", f"{video_info.get('duration', 0):.1f} 秒")
-    col4.metric("提取帧数", f"{saved.get('frame_count', 0)}")
+    col4.metric("分析帧数", f"{saved.get('frame_count', 0)}")
+
+    # 显示视角信息
+    detected_view = saved.get('detected_view', 'side')
+    st.info(f"📐 使用视角: {get_view_name(detected_view)} - {get_strategy_name(detected_view)}")
+
+    # 显示原始视频（如果有）
+    original_video_path = saved.get('original_video_path')
+    if original_video_path and Path(original_video_path).exists():
+        st.subheader("📹 原始视频")
+        st.video(original_video_path)
+
+    # 显示姿态识别视频（如果有）
+    pose_video_path = saved.get('pose_video_path')
+    if pose_video_path and Path(pose_video_path).exists():
+        st.subheader("🦴 姿态识别视频")
+        st.video(pose_video_path)
 
     # 显示关键帧（如果有）
     keyframe_data = saved.get('keyframe_data', [])
@@ -148,8 +164,9 @@ def _display_saved_results():
             cols = st.columns(3)
             for i, kf in enumerate(keyframe_data[row_start:row_start+3]):
                 with cols[i]:
-                    st.image(kf['path'], caption=f"时间: {kf['time_sec']:.2f}s",
-                             use_container_width=True)
+                    if Path(kf['path']).exists():
+                        st.image(kf['path'], caption=f"时间: {kf['time_sec']:.2f}s",
+                                 use_container_width=True)
 
     # 显示分析结果
     st.markdown("---")
@@ -227,10 +244,9 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
         progress_bar.progress(40)
 
         # 尝试生成视频
+        pose_video_path = None
         try:
             pose_video_path = generate_pose_video(frames, keypoints_sequence, fps, estimator)
-            st.subheader("🦴 姿态识别视频")
-            st.video(pose_video_path)
         except Exception as video_err:
             st.warning(f"视频生成失败: {video_err}，将显示关键帧图像")
 
@@ -321,7 +337,9 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
             'detected_view': detected_view,
             'results_for_ai': results_for_report,
             'keyframe_data': keyframe_data if keyframe_data else [],
-            'record_id': record_id
+            'record_id': record_id,
+            'pose_video_path': pose_video_path,  # 保存姿态识别视频路径
+            'original_video_path': video_path,    # 保存原始视频路径
         }
         st.session_state['analysis_complete'] = True
 

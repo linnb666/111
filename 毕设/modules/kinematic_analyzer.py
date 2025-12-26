@@ -310,30 +310,53 @@ class KinematicAnalyzer:
                                   phases: List[int]) -> Dict:
         """
         按阶段统计膝关节角度
-        优化：触地第一帧角度更准确
+        重写版：使用触地前3帧平均，更准确反映落地角度
         """
         # 分组收集各阶段的角度
         ground_contact_angles = []
-        ground_contact_first_frame_angles = []  # 触地第一帧角度
         flight_angles = []
         transition_angles = []
 
-        # 检测触地第一帧
+        # 检测每次触地的起始帧索引
+        landing_start_frames = []
         prev_phase = -1
+        for i, phase in enumerate(phases):
+            if phase == self.PHASE_GROUND_CONTACT and prev_phase != self.PHASE_GROUND_CONTACT:
+                landing_start_frames.append(i)
+            prev_phase = phase
+
+        # 方案B：取每次触地的前3帧（包括触地帧和之前2帧）角度平均
+        landing_angles = []  # 每次落地的角度（前3帧平均）
+        for landing_frame in landing_start_frames:
+            # 收集落地帧及其前2帧的角度
+            frames_to_check = []
+            for offset in range(-2, 1):  # -2, -1, 0（触地前2帧 + 触地帧）
+                frame_idx = landing_frame + offset
+                if 0 <= frame_idx < len(knee_left) and 0 <= frame_idx < len(knee_right):
+                    frames_to_check.append(frame_idx)
+
+            if frames_to_check:
+                # 计算这几帧的平均角度
+                angles_for_this_landing = []
+                for idx in frames_to_check:
+                    avg_knee = (knee_left[idx] + knee_right[idx]) / 2
+                    if not np.isnan(avg_knee):
+                        angles_for_this_landing.append(avg_knee)
+
+                if angles_for_this_landing:
+                    landing_angles.append(np.mean(angles_for_this_landing))
+
+        # 收集各阶段所有帧的角度（用于其他统计）
         for i, phase in enumerate(phases):
             if i < len(knee_left) and i < len(knee_right):
                 avg_knee = (knee_left[i] + knee_right[i]) / 2
                 if not np.isnan(avg_knee):
                     if phase == self.PHASE_GROUND_CONTACT:
                         ground_contact_angles.append(avg_knee)
-                        # 检测触地第一帧（从非触地转为触地）
-                        if prev_phase != self.PHASE_GROUND_CONTACT:
-                            ground_contact_first_frame_angles.append(avg_knee)
                     elif phase == self.PHASE_FLIGHT:
                         flight_angles.append(avg_knee)
                     else:
                         transition_angles.append(avg_knee)
-            prev_phase = phase
 
         # 计算各阶段统计量
         def safe_stats(angles):
@@ -351,16 +374,19 @@ class KinematicAnalyzer:
         knee_all = [(knee_left[i] + knee_right[i]) / 2 for i in range(min(len(knee_left), len(knee_right)))]
         knee_all = [x for x in knee_all if not np.isnan(x)]
 
-        # 触地期统计 - 优先使用第一帧角度
+        # 触地期统计 - 使用落地前3帧平均（方案B）
         gc_stats = safe_stats(ground_contact_angles)
-        if ground_contact_first_frame_angles:
-            gc_stats['first_frame_mean'] = float(np.mean(ground_contact_first_frame_angles))
-            gc_stats['first_frame_count'] = len(ground_contact_first_frame_angles)
-            # 使用第一帧平均值作为主要指标
-            gc_stats['mean'] = gc_stats['first_frame_mean']
+        if landing_angles:
+            gc_stats['landing_angle_mean'] = float(np.mean(landing_angles))
+            gc_stats['landing_count'] = len(landing_angles)
+            gc_stats['landing_angles'] = landing_angles  # 保存每步的落地角度
+            # 使用落地前3帧平均值作为主要指标
+            gc_stats['mean'] = gc_stats['landing_angle_mean']
+            print(f"  检测到 {len(landing_angles)} 次落地，落地角度: {landing_angles}")
+            print(f"  落地角度平均值: {gc_stats['mean']:.1f}°")
 
         return {
-            # 触地期角度（使用落地第一帧，理想范围：155-170°）
+            # 触地期角度（使用落地前3帧平均，理想范围：155-170°）
             'ground_contact': gc_stats,
             # 腾空期/摆动期角度（理想范围：90-130°，弯曲较大）
             'flight': safe_stats(flight_angles),
