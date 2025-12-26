@@ -184,6 +184,19 @@ class KinematicAnalyzer:
             knee_left_smooth, knee_right_smooth, phases
         )
 
+        # ⭐ 使用新方法计算落地膝角（方案A：取峰值前的帧）
+        landing_angles_result = self._calculate_landing_knee_angles(
+            keypoints_sequence, fps, knee_left_smooth, knee_right_smooth
+        )
+
+        # 将落地膝角结果合并到触地期统计中
+        if landing_angles_result['landing_count'] > 0:
+            phase_angles['ground_contact']['landing_angle_mean'] = landing_angles_result['landing_angle_mean']
+            phase_angles['ground_contact']['landing_count'] = landing_angles_result['landing_count']
+            phase_angles['ground_contact']['landing_angles'] = landing_angles_result['landing_angles']
+            # 使用落地瞬间的角度作为主要指标
+            phase_angles['ground_contact']['mean'] = landing_angles_result['landing_angle_mean']
+
         return {
             # 原始时间序列
             'knee_left': knee_left_smooth,
@@ -310,30 +323,24 @@ class KinematicAnalyzer:
                                   phases: List[int]) -> Dict:
         """
         按阶段统计膝关节角度
-        优化：触地第一帧角度更准确
+        方案A重写：使用峰值检测+加速度，取落地前3-5帧（脚即将着地时）
         """
         # 分组收集各阶段的角度
         ground_contact_angles = []
-        ground_contact_first_frame_angles = []  # 触地第一帧角度
         flight_angles = []
         transition_angles = []
 
-        # 检测触地第一帧
-        prev_phase = -1
+        # 收集各阶段所有帧的角度（用于其他统计）
         for i, phase in enumerate(phases):
             if i < len(knee_left) and i < len(knee_right):
                 avg_knee = (knee_left[i] + knee_right[i]) / 2
                 if not np.isnan(avg_knee):
                     if phase == self.PHASE_GROUND_CONTACT:
                         ground_contact_angles.append(avg_knee)
-                        # 检测触地第一帧（从非触地转为触地）
-                        if prev_phase != self.PHASE_GROUND_CONTACT:
-                            ground_contact_first_frame_angles.append(avg_knee)
                     elif phase == self.PHASE_FLIGHT:
                         flight_angles.append(avg_knee)
                     else:
                         transition_angles.append(avg_knee)
-            prev_phase = phase
 
         # 计算各阶段统计量
         def safe_stats(angles):
@@ -351,25 +358,149 @@ class KinematicAnalyzer:
         knee_all = [(knee_left[i] + knee_right[i]) / 2 for i in range(min(len(knee_left), len(knee_right)))]
         knee_all = [x for x in knee_all if not np.isnan(x)]
 
-        # 触地期统计 - 优先使用第一帧角度
+        # 触地期统计
         gc_stats = safe_stats(ground_contact_angles)
-        if ground_contact_first_frame_angles:
-            gc_stats['first_frame_mean'] = float(np.mean(ground_contact_first_frame_angles))
-            gc_stats['first_frame_count'] = len(ground_contact_first_frame_angles)
-            # 使用第一帧平均值作为主要指标
-            gc_stats['mean'] = gc_stats['first_frame_mean']
 
         return {
-            # 触地期角度（使用落地第一帧，理想范围：155-170°）
+            # 触地期角度（理想范围：155-170°）
             'ground_contact': gc_stats,
             # 腾空期/摆动期角度（理想范围：90-130°，弯曲较大）
             'flight': safe_stats(flight_angles),
             # 过渡期角度
             'transition': safe_stats(transition_angles),
             # 关键指标
-            'max_flexion': float(np.min(knee_all)) if knee_all else 0,  # 最大弯曲（最小角度）
-            'max_extension': float(np.max(knee_all)) if knee_all else 0,  # 最大伸展
+            'max_flexion': float(np.min(knee_all)) if knee_all else 0,
+            'max_extension': float(np.max(knee_all)) if knee_all else 0,
             'range_of_motion': float(np.max(knee_all) - np.min(knee_all)) if knee_all else 0,
+        }
+
+    def _detect_landing_moments(self, keypoints_sequence: List[Dict], fps: float) -> List[int]:
+        """
+        检测落地时刻（使用峰值检测+加速度）
+
+        返回：落地峰值帧索引列表
+        """
+        from scipy.signal import find_peaks
+
+        n_frames = len(keypoints_sequence)
+        if n_frames < 10:
+            return []
+
+        # 提取脚踝Y坐标
+        left_ankle_y = []
+        right_ankle_y = []
+
+        for kp in keypoints_sequence:
+            left = kp['landmarks'][27]
+            right = kp['landmarks'][28]
+            left_y = left['y_norm'] if left['visibility'] > 0.5 else np.nan
+            right_y = right['y_norm'] if right['visibility'] > 0.5 else np.nan
+            left_ankle_y.append(left_y)
+            right_ankle_y.append(right_y)
+
+        # 插值和平滑
+        left_ankle_y = self._interpolate_nans(np.array(left_ankle_y))
+        right_ankle_y = self._interpolate_nans(np.array(right_ankle_y))
+
+        if len(left_ankle_y) > 5:
+            left_ankle_y = self._smooth_signal_advanced(left_ankle_y)
+            right_ankle_y = self._smooth_signal_advanced(right_ankle_y)
+
+        # 取两脚中较低的Y值（触地的脚）
+        lower_ankle_y = np.maximum(left_ankle_y, right_ankle_y)
+
+        # 计算速度和加速度
+        velocity = np.gradient(lower_ankle_y) * fps
+        acceleration = np.gradient(velocity) * fps
+
+        # 检测Y坐标峰值（最低点=触地最深）
+        # 峰值需要有一定的突出度
+        y_range = np.max(lower_ankle_y) - np.min(lower_ankle_y)
+        min_prominence = y_range * 0.15  # 至少15%的突出度
+        min_distance = int(fps * 0.2)  # 至少间隔0.2秒（避免重复检测）
+
+        peaks, properties = find_peaks(
+            lower_ankle_y,
+            prominence=min_prominence,
+            distance=max(min_distance, 3)
+        )
+
+        # 使用加速度辅助验证：落地时加速度应该有明显变化（减速）
+        valid_peaks = []
+        for peak in peaks:
+            # 检查峰值前后的加速度变化
+            start_idx = max(0, peak - 3)
+            end_idx = min(len(acceleration), peak + 2)
+
+            if end_idx > start_idx:
+                acc_before = np.mean(acceleration[start_idx:peak]) if peak > start_idx else 0
+                # 落地前通常是正加速度（向下加速）然后减速
+                # 只要检测到峰值且有一定高度差就认为是有效的落地
+                valid_peaks.append(peak)
+
+        print(f"  落地检测：找到 {len(peaks)} 个峰值，验证后 {len(valid_peaks)} 个有效落地")
+        return valid_peaks
+
+    def _calculate_landing_knee_angles(self, keypoints_sequence: List[Dict],
+                                        fps: float,
+                                        knee_left: List[float],
+                                        knee_right: List[float]) -> Dict:
+        """
+        计算落地时刻的膝关节角度（方案A）
+
+        核心逻辑：取落地峰值前3-5帧的膝角平均（此时脚即将着地，膝关节接近伸直）
+        """
+        # 检测落地时刻
+        landing_peaks = self._detect_landing_moments(keypoints_sequence, fps)
+
+        if not landing_peaks:
+            return {
+                'landing_angle_mean': 0,
+                'landing_count': 0,
+                'landing_angles': [],
+                'method': 'no_landing_detected'
+            }
+
+        # 对每次落地，取峰值前3-5帧的膝角
+        landing_angles = []
+        frames_before = 4  # 取峰值前4帧（不包括峰值本身，因为峰值时已经在缓冲）
+
+        for peak in landing_peaks:
+            # 收集峰值前的帧（脚即将着地，膝关节较伸直）
+            angles_for_this_landing = []
+
+            for offset in range(-frames_before, 0):  # -4, -3, -2, -1（不包括峰值0）
+                frame_idx = peak + offset
+                if 0 <= frame_idx < len(knee_left) and 0 <= frame_idx < len(knee_right):
+                    left_angle = knee_left[frame_idx]
+                    right_angle = knee_right[frame_idx]
+
+                    if not np.isnan(left_angle) and not np.isnan(right_angle):
+                        avg_knee = (left_angle + right_angle) / 2
+                        angles_for_this_landing.append(avg_knee)
+
+            if angles_for_this_landing:
+                # 取这几帧的平均值作为这次落地的膝角
+                landing_angles.append(np.mean(angles_for_this_landing))
+
+        if landing_angles:
+            mean_angle = float(np.mean(landing_angles))
+            print(f"  落地膝角：检测到 {len(landing_angles)} 次落地")
+            print(f"  各次落地角度: {[f'{a:.1f}°' for a in landing_angles]}")
+            print(f"  平均落地膝角: {mean_angle:.1f}°")
+
+            return {
+                'landing_angle_mean': mean_angle,
+                'landing_count': len(landing_angles),
+                'landing_angles': landing_angles,
+                'method': 'peak_detection_before'
+            }
+
+        return {
+            'landing_angle_mean': 0,
+            'landing_count': 0,
+            'landing_angles': [],
+            'method': 'no_valid_angles'
         }
 
     def _calculate_vertical_motion_normalized(self, keypoints_sequence: List[Dict],

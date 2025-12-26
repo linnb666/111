@@ -199,7 +199,7 @@ AI_CONFIG = {
             'api_base': 'https://open.bigmodel.cn/api/paas/v4',
             'model': 'glm-4',
             'vision_model': 'glm-4v',
-            'max_tokens': 2000,
+            'max_tokens': 4000,  # 增加token限制，避免文本截断
             'temperature': 0.7
         },
         'local': {
