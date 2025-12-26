@@ -555,13 +555,22 @@ class KinematicAnalyzer:
                                         knee_left: List[float],
                                         knee_right: List[float]) -> Dict:
         """
-        计算落地时刻的膝关节角度（重构版）
+        计算落地时刻的膝关节角度（生物力学约束版）
 
-        核心逻辑：
-        1. 在落地区间内找到"最大稳定伸展角度"
-        2. 最大稳定伸展角度 = 角度最接近180°且变化率小的那段时间
-        3. 输出每步单独统计 + 整体汇总（Option C）
+        核心原则：
+        1. 宁可少输出，也不输出错误的落地膝角
+        2. 使用生物力学硬约束过滤不可信的检测
+        3. 每个落地都给出通过/拒绝原因
+
+        生物力学约束：
+        - 落地膝角范围：145° ≤ angle ≤ 175°（中长跑标准）
+        - 伸展趋势：落地前膝关节应处于伸展状态（d(knee)/dt ≥ 0）
         """
+        # 生物力学参数（硬约束）
+        MIN_LANDING_ANGLE = 145.0  # 最小落地膝角
+        MAX_LANDING_ANGLE = 175.0  # 最大落地膝角
+        PRE_LANDING_WINDOW_MS = 100.0  # 峰值前的搜索窗口（毫秒）
+
         # 检测落地区间
         landing_windows = self._detect_landing_windows(keypoints_sequence, fps)
 
@@ -570,132 +579,207 @@ class KinematicAnalyzer:
                 'landing_angle_mean': 0,
                 'landing_angle_std': 0,
                 'landing_count': 0,
+                'valid_count': 0,
+                'rejected_count': 0,
                 'landing_angles': [],
                 'per_step_stats': [],
-                'method': 'no_landing_detected'
+                'rejected_steps': [],
+                'method': 'biomechanical_constrained_v3'
             }
 
-        # 计算膝角变化率（用于判断稳定性）
-        knee_avg = np.array([(knee_left[i] + knee_right[i]) / 2
-                             for i in range(min(len(knee_left), len(knee_right)))])
-        knee_rate = np.abs(np.gradient(knee_avg))
+        # 计算膝角变化率（用于伸展趋势判断）
+        # 注意：使用有符号的梯度，正值=伸展，负值=屈曲
+        knee_left_arr = np.array(knee_left)
+        knee_right_arr = np.array(knee_right)
+        knee_left_rate = np.gradient(knee_left_arr)  # 有符号
+        knee_right_rate = np.gradient(knee_right_arr)
 
-        # 对每个落地区间计算最大稳定伸展角度
-        per_step_stats = []
-        landing_angles = []
+        # 计算峰值前搜索窗口的帧数
+        pre_landing_frames = int(PRE_LANDING_WINDOW_MS * fps / 1000.0)
+        pre_landing_frames = max(2, min(pre_landing_frames, 6))  # 限制在2-6帧
+
+        # 对每个落地候选应用生物力学约束
+        valid_landings = []
+        rejected_landings = []
 
         for window in landing_windows:
-            result = self._find_max_stable_extension(
-                knee_left, knee_right, knee_rate,
-                window['start'], window['end'], window['peak'], window['foot']
+            result = self._validate_landing_biomechanics(
+                knee_left_arr, knee_right_arr,
+                knee_left_rate, knee_right_rate,
+                window['peak'], window['foot'],
+                pre_landing_frames,
+                MIN_LANDING_ANGLE, MAX_LANDING_ANGLE
             )
 
+            step_info = {
+                'peak_frame': int(window['peak']),
+                'foot': str(window['foot']),
+                'duration_ms': float(window['duration_ms'])
+            }
+
             if result['valid']:
-                landing_angles.append(result['max_stable_angle'])
-                per_step_stats.append({
-                    'step_index': int(len(per_step_stats) + 1),
-                    'foot': str(window['foot']),
-                    'window_start': int(window['start']),
-                    'window_end': int(window['end']),
-                    'max_stable_angle': float(result['max_stable_angle']),
-                    'angle_std': float(result['angle_std']),
-                    'stable_frame_count': int(result['stable_frame_count']),
-                    'duration_ms': float(window['duration_ms'])
+                step_info.update({
+                    'landing_angle': float(result['landing_angle']),
+                    'extension_rate': float(result['extension_rate']),
+                    'confidence': result['confidence']
                 })
+                valid_landings.append(step_info)
+            else:
+                step_info.update({
+                    'rejection_reason': result['rejection_reason'],
+                    'actual_angle': float(result.get('actual_angle', 0)),
+                    'actual_rate': float(result.get('actual_rate', 0))
+                })
+                rejected_landings.append(step_info)
 
         # 整体汇总统计
+        landing_angles = [s['landing_angle'] for s in valid_landings]
+
+        print(f"  落地膝角分析（生物力学约束版）：")
+        print(f"    候选落地: {len(landing_windows)} 次")
+        print(f"    通过约束: {len(valid_landings)} 次")
+        print(f"    被拒绝: {len(rejected_landings)} 次")
+
+        if rejected_landings:
+            reasons = {}
+            for r in rejected_landings:
+                reason = r['rejection_reason']
+                reasons[reason] = reasons.get(reason, 0) + 1
+            print(f"    拒绝原因: {reasons}")
+
         if landing_angles:
             mean_angle = float(np.mean(landing_angles))
-            std_angle = float(np.std(landing_angles))
-
-            print(f"  落地膝角分析（重构版）：")
-            print(f"    检测到 {len(landing_angles)} 次有效落地")
-            print(f"    各次角度: {[f'{a:.1f}°' for a in landing_angles]}")
+            std_angle = float(np.std(landing_angles)) if len(landing_angles) > 1 else 0.0
+            print(f"    有效角度: {[f'{a:.1f}°' for a in landing_angles]}")
             print(f"    平均: {mean_angle:.1f}°, 标准差: {std_angle:.1f}°")
 
             return {
                 'landing_angle_mean': mean_angle,
                 'landing_angle_std': std_angle,
                 'landing_count': int(len(landing_angles)),
+                'valid_count': int(len(valid_landings)),
+                'rejected_count': int(len(rejected_landings)),
                 'landing_angles': [float(a) for a in landing_angles],
-                'per_step_stats': per_step_stats,
-                'method': 'max_stable_extension_v2'
+                'per_step_stats': valid_landings,
+                'rejected_steps': rejected_landings,
+                'method': 'biomechanical_constrained_v3'
             }
 
         return {
             'landing_angle_mean': 0,
             'landing_angle_std': 0,
             'landing_count': 0,
+            'valid_count': 0,
+            'rejected_count': int(len(rejected_landings)),
             'landing_angles': [],
             'per_step_stats': [],
-            'method': 'no_valid_angles'
+            'rejected_steps': rejected_landings,
+            'method': 'biomechanical_constrained_v3'
         }
 
-    def _find_max_stable_extension(self, knee_left: List[float], knee_right: List[float],
-                                    knee_rate: np.ndarray,
-                                    start: int, end: int, peak: int, foot: str) -> Dict:
+    def _validate_landing_biomechanics(self, knee_left: np.ndarray, knee_right: np.ndarray,
+                                        knee_left_rate: np.ndarray, knee_right_rate: np.ndarray,
+                                        peak: int, foot: str, window_frames: int,
+                                        min_angle: float, max_angle: float) -> Dict:
         """
-        在落地区间内找到最大稳定伸展角度
+        使用生物力学约束验证单次落地
 
-        定义：
-        - "最大"：角度最接近180°（完全伸直）
-        - "稳定"：变化率小于阈值（基于整体变化率的百分位数）
+        约束条件：
+        1. 膝角范围：min_angle ≤ angle ≤ max_angle
+        2. 伸展趋势：落地前膝关节应在伸展（rate ≥ 0）
 
-        搜索范围：落地区间开始到峰值（即脚接近地面时）
+        搜索策略：
+        - 在peak前的固定时间窗内搜索
+        - 只保留同时满足角度范围+伸展趋势的帧
+        - 在合法帧中选取最大角度
         """
-        # 搜索范围：从区间开始到峰值
-        search_start = start
-        search_end = peak + 1  # 包含峰值帧
+        n = len(knee_left)
 
-        if search_end <= search_start or search_end > len(knee_left):
-            return {'valid': False, 'max_stable_angle': 0, 'angle_std': 0, 'stable_frame_count': 0}
+        # 确定搜索范围：peak前的window_frames帧
+        search_start = max(0, peak - window_frames)
+        search_end = peak  # 不包括peak本身（peak时已经在缓冲）
 
-        # 收集区间内的角度
-        angles_in_window = []
-        rates_in_window = []
+        if search_start >= search_end:
+            return {'valid': False, 'rejection_reason': 'window_too_small'}
 
-        for i in range(search_start, search_end):
-            if i < len(knee_left) and i < len(knee_right):
-                if foot == 'left':
-                    angle = knee_left[i]
-                elif foot == 'right':
-                    angle = knee_right[i]
-                else:
-                    angle = (knee_left[i] + knee_right[i]) / 2
-
-                if not np.isnan(angle) and i < len(knee_rate):
-                    angles_in_window.append(angle)
-                    rates_in_window.append(knee_rate[i])
-
-        if len(angles_in_window) < 2:
-            return {'valid': False, 'max_stable_angle': 0, 'angle_std': 0, 'stable_frame_count': 0}
-
-        angles_in_window = np.array(angles_in_window)
-        rates_in_window = np.array(rates_in_window)
-
-        # 确定"稳定"的变化率阈值（使用区间内变化率的中位数）
-        rate_threshold = np.median(rates_in_window) * 1.5
-
-        # 找到稳定的帧（变化率低于阈值）
-        stable_mask = rates_in_window <= rate_threshold
-        stable_angles = angles_in_window[stable_mask]
-
-        if len(stable_angles) >= 1:
-            # 在稳定帧中找最大角度（最接近180°）
-            max_stable_angle = float(np.max(stable_angles))
-            angle_std = float(np.std(stable_angles)) if len(stable_angles) > 1 else 0.0
-            stable_count = len(stable_angles)
+        # 选择对应脚的膝角数据
+        if foot == 'left':
+            angles = knee_left[search_start:search_end]
+            rates = knee_left_rate[search_start:search_end]
+        elif foot == 'right':
+            angles = knee_right[search_start:search_end]
+            rates = knee_right_rate[search_start:search_end]
         else:
-            # 如果没有稳定帧，退化为取区间内最大角度
-            max_stable_angle = float(np.max(angles_in_window))
-            angle_std = float(np.std(angles_in_window))
-            stable_count = 0
+            angles = (knee_left[search_start:search_end] + knee_right[search_start:search_end]) / 2
+            rates = (knee_left_rate[search_start:search_end] + knee_right_rate[search_start:search_end]) / 2
+
+        # 过滤NaN
+        valid_mask = ~np.isnan(angles)
+        if not np.any(valid_mask):
+            return {'valid': False, 'rejection_reason': 'no_valid_frames'}
+
+        angles = angles[valid_mask]
+        rates = rates[valid_mask]
+
+        # 约束1：膝角范围 [min_angle, max_angle]
+        angle_valid = (angles >= min_angle) & (angles <= max_angle)
+
+        # 约束2：伸展趋势（rate ≥ -1，允许轻微波动）
+        # 使用-1而非0是为了容忍测量噪声
+        extension_valid = rates >= -1.0
+
+        # 同时满足两个约束
+        both_valid = angle_valid & extension_valid
+
+        # 统计分析
+        max_angle_in_window = float(np.max(angles))
+        mean_rate_in_window = float(np.mean(rates))
+
+        if not np.any(both_valid):
+            # 判断拒绝原因
+            if not np.any(angle_valid):
+                if max_angle_in_window < min_angle:
+                    return {
+                        'valid': False,
+                        'rejection_reason': 'angle_too_low',
+                        'actual_angle': max_angle_in_window,
+                        'actual_rate': mean_rate_in_window
+                    }
+                else:
+                    return {
+                        'valid': False,
+                        'rejection_reason': 'angle_too_high',
+                        'actual_angle': max_angle_in_window,
+                        'actual_rate': mean_rate_in_window
+                    }
+            else:
+                return {
+                    'valid': False,
+                    'rejection_reason': 'flexion_trend',
+                    'actual_angle': max_angle_in_window,
+                    'actual_rate': mean_rate_in_window
+                }
+
+        # 在合法帧中选取最大角度
+        valid_angles = angles[both_valid]
+        valid_rates = rates[both_valid]
+
+        best_angle = float(np.max(valid_angles))
+        best_idx = np.argmax(valid_angles)
+        best_rate = float(valid_rates[best_idx])
+
+        # 计算置信度（基于合法帧占比和角度稳定性）
+        valid_ratio = np.sum(both_valid) / len(angles)
+        angle_stability = 1.0 - min(np.std(valid_angles) / 10.0, 1.0) if len(valid_angles) > 1 else 0.5
+        confidence = (valid_ratio * 0.5 + angle_stability * 0.5)
 
         return {
             'valid': True,
-            'max_stable_angle': max_stable_angle,
-            'angle_std': angle_std,
-            'stable_frame_count': stable_count
+            'landing_angle': best_angle,
+            'extension_rate': best_rate,
+            'confidence': f"{confidence:.0%}",
+            'valid_frame_count': int(np.sum(both_valid)),
+            'total_frame_count': int(len(angles))
         }
 
     def _calculate_vertical_motion_normalized(self, keypoints_sequence: List[Dict],
