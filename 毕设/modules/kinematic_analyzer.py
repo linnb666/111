@@ -488,16 +488,16 @@ class KinematicAnalyzer:
                     end = j
                     break
 
-            duration_frames = end - start + 1
-            duration_ms = duration_frames * 1000.0 / fps
+            duration_frames = int(end - start + 1)
+            duration_ms = float(duration_frames * 1000.0 / fps)
 
             # 合理性检查：触地区间应在50-300ms之间
             if 50 <= duration_ms <= 300:
                 landing_windows.append({
-                    'start': start,
-                    'peak': peak,
-                    'end': end,
-                    'foot': foot,
+                    'start': int(start),
+                    'peak': int(peak),
+                    'end': int(end),
+                    'foot': str(foot),
                     'duration_frames': duration_frames,
                     'duration_ms': duration_ms,
                     'peak_value': float(peak_value),
@@ -593,14 +593,14 @@ class KinematicAnalyzer:
             if result['valid']:
                 landing_angles.append(result['max_stable_angle'])
                 per_step_stats.append({
-                    'step_index': len(per_step_stats) + 1,
-                    'foot': window['foot'],
-                    'window_start': window['start'],
-                    'window_end': window['end'],
-                    'max_stable_angle': result['max_stable_angle'],
-                    'angle_std': result['angle_std'],
-                    'stable_frame_count': result['stable_frame_count'],
-                    'duration_ms': window['duration_ms']
+                    'step_index': int(len(per_step_stats) + 1),
+                    'foot': str(window['foot']),
+                    'window_start': int(window['start']),
+                    'window_end': int(window['end']),
+                    'max_stable_angle': float(result['max_stable_angle']),
+                    'angle_std': float(result['angle_std']),
+                    'stable_frame_count': int(result['stable_frame_count']),
+                    'duration_ms': float(window['duration_ms'])
                 })
 
         # 整体汇总统计
@@ -616,8 +616,8 @@ class KinematicAnalyzer:
             return {
                 'landing_angle_mean': mean_angle,
                 'landing_angle_std': std_angle,
-                'landing_count': len(landing_angles),
-                'landing_angles': landing_angles,
+                'landing_count': int(len(landing_angles)),
+                'landing_angles': [float(a) for a in landing_angles],
                 'per_step_stats': per_step_stats,
                 'method': 'max_stable_extension_v2'
             }
