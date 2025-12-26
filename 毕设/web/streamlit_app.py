@@ -557,34 +557,83 @@ def display_results(quality, kinematic, temporal, local_report, view_angle='side
         angles = kinematic.get('angles', {})
 
         if 'phase_analysis' in angles:
-            st.subheader("🦵 膝关节角度分析（分阶段）")
+            st.subheader("🦵 膝关节角度分析")
             phase_analysis = angles['phase_analysis']
-
-            phase_cols = st.columns(3)
-
-            # 触地阶段
             gc = phase_analysis.get('ground_contact', {})
-            with phase_cols[0]:
-                st.markdown("**触地阶段**")
-                st.metric("平均角度", f"{gc.get('mean', 0):.1f}°")
-                st.caption(f"范围: {gc.get('min', 0):.1f}° - {gc.get('max', 0):.1f}°")
-                st.caption(f"帧数: {gc.get('count', 0)}")
 
-            # 腾空阶段
-            fl = phase_analysis.get('flight', {})
-            with phase_cols[1]:
-                st.markdown("**腾空阶段**")
-                st.metric("平均角度", f"{fl.get('mean', 0):.1f}°")
-                st.caption(f"范围: {fl.get('min', 0):.1f}° - {fl.get('max', 0):.1f}°")
-                st.caption(f"帧数: {fl.get('count', 0)}")
+            # 落地膝角（重点指标）
+            landing_mean = gc.get('landing_angle_mean', gc.get('mean', 0))
+            landing_std = gc.get('landing_angle_std', gc.get('std', 0))
+            landing_count = gc.get('landing_count', gc.get('count', 0))
 
-            # 过渡阶段
-            tr = phase_analysis.get('transition', {})
-            with phase_cols[2]:
-                st.markdown("**过渡阶段**")
-                st.metric("平均角度", f"{tr.get('mean', 0):.1f}°")
-                st.caption(f"范围: {tr.get('min', 0):.1f}° - {tr.get('max', 0):.1f}°")
-                st.caption(f"帧数: {tr.get('count', 0)}")
+            # 落地膝角评级
+            if landing_mean >= 165:
+                landing_rating = "优秀"
+                landing_color = "green"
+            elif landing_mean >= 155:
+                landing_rating = "良好"
+                landing_color = "blue"
+            elif landing_mean >= 145:
+                landing_rating = "一般"
+                landing_color = "orange"
+            else:
+                landing_rating = "需改进"
+                landing_color = "red"
+
+            # 主要指标显示
+            st.markdown("### 落地时膝关节角度（最大稳定伸展角）")
+            main_cols = st.columns([2, 1, 1])
+            with main_cols[0]:
+                st.metric(
+                    "平均角度",
+                    f"{landing_mean:.1f}°",
+                    delta=landing_rating
+                )
+            with main_cols[1]:
+                st.metric("标准差", f"±{landing_std:.1f}°")
+            with main_cols[2]:
+                st.metric("检测步数", f"{landing_count}")
+
+            st.caption("理想范围：155-170°（接近完全伸直但略有弯曲以缓冲冲击）")
+
+            # 每步详细统计（可展开）
+            per_step_stats = gc.get('per_step_stats', [])
+            if per_step_stats:
+                with st.expander(f"📊 每步详细数据（共{len(per_step_stats)}步）", expanded=False):
+                    import pandas as pd
+                    step_data = []
+                    for step in per_step_stats:
+                        step_data.append({
+                            '步数': step.get('step_index', 0),
+                            '脚': '左' if step.get('foot') == 'left' else '右',
+                            '膝角(°)': f"{step.get('max_stable_angle', 0):.1f}",
+                            '区间内标准差': f"{step.get('angle_std', 0):.2f}",
+                            '稳定帧数': step.get('stable_frame_count', 0),
+                            '触地时长(ms)': f"{step.get('duration_ms', 0):.0f}"
+                        })
+                    df = pd.DataFrame(step_data)
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+
+            # 其他阶段角度（折叠显示）
+            with st.expander("其他阶段角度统计", expanded=False):
+                phase_cols = st.columns(3)
+
+                with phase_cols[0]:
+                    st.markdown("**触地阶段整体**")
+                    st.caption(f"平均: {gc.get('mean', 0):.1f}°")
+                    st.caption(f"范围: {gc.get('min', 0):.1f}° - {gc.get('max', 0):.1f}°")
+
+                fl = phase_analysis.get('flight', {})
+                with phase_cols[1]:
+                    st.markdown("**腾空阶段**")
+                    st.caption(f"平均: {fl.get('mean', 0):.1f}°")
+                    st.caption(f"范围: {fl.get('min', 0):.1f}° - {fl.get('max', 0):.1f}°")
+
+                tr = phase_analysis.get('transition', {})
+                with phase_cols[2]:
+                    st.markdown("**过渡阶段**")
+                    st.caption(f"平均: {tr.get('mean', 0):.1f}°")
+                    st.caption(f"范围: {tr.get('min', 0):.1f}° - {tr.get('max', 0):.1f}°")
 
     # 正面视角分析（移除对称性，保留下肢力线和肩部稳定）
     if view_angle == 'front':

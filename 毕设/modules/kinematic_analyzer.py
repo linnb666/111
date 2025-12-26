@@ -189,13 +189,16 @@ class KinematicAnalyzer:
             keypoints_sequence, fps, knee_left_smooth, knee_right_smooth
         )
 
-        # 将落地膝角结果合并到触地期统计中
+        # 将落地膝角结果合并到触地期统计中（包含每步统计）
         if landing_angles_result['landing_count'] > 0:
             phase_angles['ground_contact']['landing_angle_mean'] = landing_angles_result['landing_angle_mean']
+            phase_angles['ground_contact']['landing_angle_std'] = landing_angles_result.get('landing_angle_std', 0)
             phase_angles['ground_contact']['landing_count'] = landing_angles_result['landing_count']
             phase_angles['ground_contact']['landing_angles'] = landing_angles_result['landing_angles']
+            phase_angles['ground_contact']['per_step_stats'] = landing_angles_result.get('per_step_stats', [])
             # 使用落地瞬间的角度作为主要指标
             phase_angles['ground_contact']['mean'] = landing_angles_result['landing_angle_mean']
+            phase_angles['ground_contact']['std'] = landing_angles_result.get('landing_angle_std', 0)
 
         return {
             # 原始时间序列
@@ -374,19 +377,23 @@ class KinematicAnalyzer:
             'range_of_motion': float(np.max(knee_all) - np.min(knee_all)) if knee_all else 0,
         }
 
-    def _detect_landing_moments(self, keypoints_sequence: List[Dict], fps: float) -> List[int]:
+    def _detect_landing_windows(self, keypoints_sequence: List[Dict], fps: float) -> List[Dict]:
         """
-        检测落地时刻（使用峰值检测+加速度）
+        检测落地区间（重构版：基于周期性 + 相对阈值）
 
-        返回：落地峰值帧索引列表
+        核心改进：
+        1. 检测落地"区间"而非单一帧
+        2. 使用IQR/百分位数自适应阈值
+        3. 周期性验证（相邻落地间隔应相似）
+        4. 分别检测左右脚落地
+
+        返回：落地区间列表，每个包含 {start, peak, end, foot, duration_ms}
         """
-        from scipy.signal import find_peaks
-
         n_frames = len(keypoints_sequence)
-        if n_frames < 10:
+        if n_frames < 15:
             return []
 
-        # 提取脚踝Y坐标
+        # 提取左右脚踝Y坐标
         left_ankle_y = []
         right_ankle_y = []
 
@@ -398,109 +405,297 @@ class KinematicAnalyzer:
             left_ankle_y.append(left_y)
             right_ankle_y.append(right_y)
 
-        # 插值和平滑
         left_ankle_y = self._interpolate_nans(np.array(left_ankle_y))
         right_ankle_y = self._interpolate_nans(np.array(right_ankle_y))
 
-        if len(left_ankle_y) > 5:
-            left_ankle_y = self._smooth_signal_advanced(left_ankle_y)
-            right_ankle_y = self._smooth_signal_advanced(right_ankle_y)
+        # 轻度平滑（Savitzky-Golay，保留峰值特征）
+        window_size = min(7, len(left_ankle_y) // 3)
+        if window_size % 2 == 0:
+            window_size -= 1
+        if window_size >= 3:
+            left_ankle_y = savgol_filter(left_ankle_y, window_size, 2)
+            right_ankle_y = savgol_filter(right_ankle_y, window_size, 2)
 
-        # 取两脚中较低的Y值（触地的脚）
-        lower_ankle_y = np.maximum(left_ankle_y, right_ankle_y)
+        # 分别检测左右脚落地区间
+        left_windows = self._detect_foot_landing_windows(left_ankle_y, fps, 'left')
+        right_windows = self._detect_foot_landing_windows(right_ankle_y, fps, 'right')
 
-        # 计算速度和加速度
-        velocity = np.gradient(lower_ankle_y) * fps
-        acceleration = np.gradient(velocity) * fps
+        # 合并并按时间排序
+        all_windows = left_windows + right_windows
+        all_windows.sort(key=lambda x: x['peak'])
 
-        # 检测Y坐标峰值（最低点=触地最深）
-        # 峰值需要有一定的突出度
-        y_range = np.max(lower_ankle_y) - np.min(lower_ankle_y)
-        min_prominence = y_range * 0.15  # 至少15%的突出度
-        min_distance = int(fps * 0.2)  # 至少间隔0.2秒（避免重复检测）
+        # 周期性验证：过滤异常间隔的落地
+        validated_windows = self._validate_landing_periodicity(all_windows, fps)
 
+        print(f"  落地区间检测：左脚{len(left_windows)}次，右脚{len(right_windows)}次")
+        print(f"  周期性验证后：{len(validated_windows)}次有效落地")
+
+        return validated_windows
+
+    def _detect_foot_landing_windows(self, ankle_y: np.ndarray, fps: float, foot: str) -> List[Dict]:
+        """
+        检测单脚的落地区间
+
+        使用相对阈值（基于IQR）而非硬编码常数
+        """
+        n = len(ankle_y)
+        if n < 10:
+            return []
+
+        # 计算自适应阈值（基于IQR）
+        q25 = np.percentile(ankle_y, 25)
+        q75 = np.percentile(ankle_y, 75)
+        iqr = q75 - q25
+        median = np.median(ankle_y)
+
+        # 峰值检测参数（基于数据分布）
+        # prominence：至少要突出IQR的30%
+        min_prominence = iqr * 0.3
+        # distance：基于典型步频（150-200步/分），最小间隔约0.3秒
+        min_distance = max(3, int(fps * 0.25))
+
+        # 检测峰值（Y值最大=位置最低=触地）
         peaks, properties = find_peaks(
-            lower_ankle_y,
-            prominence=min_prominence,
-            distance=max(min_distance, 3)
+            ankle_y,
+            prominence=max(min_prominence, 0.01),  # 至少0.01防止太小
+            distance=min_distance
         )
 
-        # 使用加速度辅助验证：落地时加速度应该有明显变化（减速）
-        valid_peaks = []
-        for peak in peaks:
-            # 检查峰值前后的加速度变化
-            start_idx = max(0, peak - 3)
-            end_idx = min(len(acceleration), peak + 2)
+        if len(peaks) == 0:
+            return []
 
-            if end_idx > start_idx:
-                acc_before = np.mean(acceleration[start_idx:peak]) if peak > start_idx else 0
-                # 落地前通常是正加速度（向下加速）然后减速
-                # 只要检测到峰值且有一定高度差就认为是有效的落地
-                valid_peaks.append(peak)
+        # 为每个峰值确定落地区间
+        landing_windows = []
+        prominences = properties['prominences']
 
-        print(f"  落地检测：找到 {len(peaks)} 个峰值，验证后 {len(valid_peaks)} 个有效落地")
-        return valid_peaks
+        # 区间边界阈值：峰值高度减去prominence的50%
+        for i, peak in enumerate(peaks):
+            peak_value = ankle_y[peak]
+            prominence = prominences[i]
+            boundary_threshold = peak_value - prominence * 0.5
+
+            # 向前找区间开始
+            start = peak
+            for j in range(peak - 1, max(0, peak - int(fps * 0.2)) - 1, -1):
+                if ankle_y[j] < boundary_threshold:
+                    start = j + 1
+                    break
+
+            # 向后找区间结束
+            end = peak
+            for j in range(peak + 1, min(n, peak + int(fps * 0.2))):
+                if ankle_y[j] < boundary_threshold:
+                    end = j
+                    break
+
+            duration_frames = end - start + 1
+            duration_ms = duration_frames * 1000.0 / fps
+
+            # 合理性检查：触地区间应在50-300ms之间
+            if 50 <= duration_ms <= 300:
+                landing_windows.append({
+                    'start': start,
+                    'peak': peak,
+                    'end': end,
+                    'foot': foot,
+                    'duration_frames': duration_frames,
+                    'duration_ms': duration_ms,
+                    'peak_value': float(peak_value),
+                    'prominence': float(prominence)
+                })
+
+        return landing_windows
+
+    def _validate_landing_periodicity(self, windows: List[Dict], fps: float) -> List[Dict]:
+        """
+        基于周期性验证落地检测的有效性
+
+        核心逻辑：相邻落地间隔应相似（跑步是周期性运动）
+        使用IQR方法剔除异常间隔
+        """
+        if len(windows) < 3:
+            return windows
+
+        # 计算相邻落地间隔
+        intervals = []
+        for i in range(1, len(windows)):
+            interval = windows[i]['peak'] - windows[i-1]['peak']
+            intervals.append(interval)
+
+        if len(intervals) < 2:
+            return windows
+
+        intervals = np.array(intervals)
+
+        # 使用IQR方法确定合理间隔范围
+        q25 = np.percentile(intervals, 25)
+        q75 = np.percentile(intervals, 75)
+        iqr = q75 - q25
+        lower_bound = q25 - 1.5 * iqr
+        upper_bound = q75 + 1.5 * iqr
+
+        # 同时考虑物理约束：步频通常在120-220步/分
+        min_interval = fps * 60 / 220  # 约0.27秒
+        max_interval = fps * 60 / 120  # 约0.5秒
+
+        lower_bound = max(lower_bound, min_interval)
+        upper_bound = min(upper_bound, max_interval)
+
+        # 标记有效的落地
+        valid_windows = [windows[0]]  # 第一个默认保留
+        for i in range(1, len(windows)):
+            interval = windows[i]['peak'] - windows[i-1]['peak']
+            if lower_bound <= interval <= upper_bound:
+                valid_windows.append(windows[i])
+
+        return valid_windows
 
     def _calculate_landing_knee_angles(self, keypoints_sequence: List[Dict],
                                         fps: float,
                                         knee_left: List[float],
                                         knee_right: List[float]) -> Dict:
         """
-        计算落地时刻的膝关节角度（方案A）
+        计算落地时刻的膝关节角度（重构版）
 
-        核心逻辑：取落地峰值前3-5帧的膝角平均（此时脚即将着地，膝关节接近伸直）
+        核心逻辑：
+        1. 在落地区间内找到"最大稳定伸展角度"
+        2. 最大稳定伸展角度 = 角度最接近180°且变化率小的那段时间
+        3. 输出每步单独统计 + 整体汇总（Option C）
         """
-        # 检测落地时刻
-        landing_peaks = self._detect_landing_moments(keypoints_sequence, fps)
+        # 检测落地区间
+        landing_windows = self._detect_landing_windows(keypoints_sequence, fps)
 
-        if not landing_peaks:
+        if not landing_windows:
             return {
                 'landing_angle_mean': 0,
+                'landing_angle_std': 0,
                 'landing_count': 0,
                 'landing_angles': [],
+                'per_step_stats': [],
                 'method': 'no_landing_detected'
             }
 
-        # 对每次落地，取峰值前3-5帧的膝角
+        # 计算膝角变化率（用于判断稳定性）
+        knee_avg = np.array([(knee_left[i] + knee_right[i]) / 2
+                             for i in range(min(len(knee_left), len(knee_right)))])
+        knee_rate = np.abs(np.gradient(knee_avg))
+
+        # 对每个落地区间计算最大稳定伸展角度
+        per_step_stats = []
         landing_angles = []
-        frames_before = 4  # 取峰值前4帧（不包括峰值本身，因为峰值时已经在缓冲）
 
-        for peak in landing_peaks:
-            # 收集峰值前的帧（脚即将着地，膝关节较伸直）
-            angles_for_this_landing = []
+        for window in landing_windows:
+            result = self._find_max_stable_extension(
+                knee_left, knee_right, knee_rate,
+                window['start'], window['end'], window['peak'], window['foot']
+            )
 
-            for offset in range(-frames_before, 0):  # -4, -3, -2, -1（不包括峰值0）
-                frame_idx = peak + offset
-                if 0 <= frame_idx < len(knee_left) and 0 <= frame_idx < len(knee_right):
-                    left_angle = knee_left[frame_idx]
-                    right_angle = knee_right[frame_idx]
+            if result['valid']:
+                landing_angles.append(result['max_stable_angle'])
+                per_step_stats.append({
+                    'step_index': len(per_step_stats) + 1,
+                    'foot': window['foot'],
+                    'window_start': window['start'],
+                    'window_end': window['end'],
+                    'max_stable_angle': result['max_stable_angle'],
+                    'angle_std': result['angle_std'],
+                    'stable_frame_count': result['stable_frame_count'],
+                    'duration_ms': window['duration_ms']
+                })
 
-                    if not np.isnan(left_angle) and not np.isnan(right_angle):
-                        avg_knee = (left_angle + right_angle) / 2
-                        angles_for_this_landing.append(avg_knee)
-
-            if angles_for_this_landing:
-                # 取这几帧的平均值作为这次落地的膝角
-                landing_angles.append(np.mean(angles_for_this_landing))
-
+        # 整体汇总统计
         if landing_angles:
             mean_angle = float(np.mean(landing_angles))
-            print(f"  落地膝角：检测到 {len(landing_angles)} 次落地")
-            print(f"  各次落地角度: {[f'{a:.1f}°' for a in landing_angles]}")
-            print(f"  平均落地膝角: {mean_angle:.1f}°")
+            std_angle = float(np.std(landing_angles))
+
+            print(f"  落地膝角分析（重构版）：")
+            print(f"    检测到 {len(landing_angles)} 次有效落地")
+            print(f"    各次角度: {[f'{a:.1f}°' for a in landing_angles]}")
+            print(f"    平均: {mean_angle:.1f}°, 标准差: {std_angle:.1f}°")
 
             return {
                 'landing_angle_mean': mean_angle,
+                'landing_angle_std': std_angle,
                 'landing_count': len(landing_angles),
                 'landing_angles': landing_angles,
-                'method': 'peak_detection_before'
+                'per_step_stats': per_step_stats,
+                'method': 'max_stable_extension_v2'
             }
 
         return {
             'landing_angle_mean': 0,
+            'landing_angle_std': 0,
             'landing_count': 0,
             'landing_angles': [],
+            'per_step_stats': [],
             'method': 'no_valid_angles'
+        }
+
+    def _find_max_stable_extension(self, knee_left: List[float], knee_right: List[float],
+                                    knee_rate: np.ndarray,
+                                    start: int, end: int, peak: int, foot: str) -> Dict:
+        """
+        在落地区间内找到最大稳定伸展角度
+
+        定义：
+        - "最大"：角度最接近180°（完全伸直）
+        - "稳定"：变化率小于阈值（基于整体变化率的百分位数）
+
+        搜索范围：落地区间开始到峰值（即脚接近地面时）
+        """
+        # 搜索范围：从区间开始到峰值
+        search_start = start
+        search_end = peak + 1  # 包含峰值帧
+
+        if search_end <= search_start or search_end > len(knee_left):
+            return {'valid': False, 'max_stable_angle': 0, 'angle_std': 0, 'stable_frame_count': 0}
+
+        # 收集区间内的角度
+        angles_in_window = []
+        rates_in_window = []
+
+        for i in range(search_start, search_end):
+            if i < len(knee_left) and i < len(knee_right):
+                if foot == 'left':
+                    angle = knee_left[i]
+                elif foot == 'right':
+                    angle = knee_right[i]
+                else:
+                    angle = (knee_left[i] + knee_right[i]) / 2
+
+                if not np.isnan(angle) and i < len(knee_rate):
+                    angles_in_window.append(angle)
+                    rates_in_window.append(knee_rate[i])
+
+        if len(angles_in_window) < 2:
+            return {'valid': False, 'max_stable_angle': 0, 'angle_std': 0, 'stable_frame_count': 0}
+
+        angles_in_window = np.array(angles_in_window)
+        rates_in_window = np.array(rates_in_window)
+
+        # 确定"稳定"的变化率阈值（使用区间内变化率的中位数）
+        rate_threshold = np.median(rates_in_window) * 1.5
+
+        # 找到稳定的帧（变化率低于阈值）
+        stable_mask = rates_in_window <= rate_threshold
+        stable_angles = angles_in_window[stable_mask]
+
+        if len(stable_angles) >= 1:
+            # 在稳定帧中找最大角度（最接近180°）
+            max_stable_angle = float(np.max(stable_angles))
+            angle_std = float(np.std(stable_angles)) if len(stable_angles) > 1 else 0.0
+            stable_count = len(stable_angles)
+        else:
+            # 如果没有稳定帧，退化为取区间内最大角度
+            max_stable_angle = float(np.max(angles_in_window))
+            angle_std = float(np.std(angles_in_window))
+            stable_count = 0
+
+        return {
+            'valid': True,
+            'max_stable_angle': max_stable_angle,
+            'angle_std': angle_std,
+            'stable_frame_count': stable_count
         }
 
     def _calculate_vertical_motion_normalized(self, keypoints_sequence: List[Dict],
