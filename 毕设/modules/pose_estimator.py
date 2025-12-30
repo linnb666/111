@@ -1,13 +1,27 @@
 # modules/pose_estimator.py
 """
 姿态估计器模块 - 统一接口设计
-支持多种后端：MediaPipe（当前）、MMPose（预留）
+支持多种后端：
+- MediaPipe（2D后备方案）
+- MMPose + MotionBERT（3D主方案）
 """
 import cv2
 import numpy as np
 from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple, Optional
 from config.config import POSE_CONFIG
+
+# 导入3D估计器
+try:
+    from modules.pose_estimator_3d import (
+        create_pose_estimator_3d,
+        BasePoseEstimator3D,
+        MMPose3DEstimator,
+        MediaPipeFallback
+    )
+    HAS_3D_ESTIMATOR = True
+except ImportError:
+    HAS_3D_ESTIMATOR = False
 
 
 class BasePoseEstimator(ABC):
@@ -359,23 +373,201 @@ class MMPosePoseEstimator(BasePoseEstimator):
 
 
 # 工厂函数
-def create_pose_estimator(backend: str = 'mediapipe', config: Dict = None) -> BasePoseEstimator:
+def create_pose_estimator(backend: str = None, config: Dict = None) -> BasePoseEstimator:
     """
     创建姿态估计器的工厂函数
 
     Args:
-        backend: 后端类型 ('mediapipe', 'mmpose')
+        backend: 后端类型 ('mediapipe', 'mmpose', 'mmpose_3d')
+                 如果为None，使用配置文件中的默认值
         config: 配置字典
 
     Returns:
         姿态估计器实例
     """
+    if backend is None:
+        backend = POSE_CONFIG.get('backend', 'mediapipe')
+
+    # 3D后端（推荐）
+    if backend == 'mmpose_3d':
+        if HAS_3D_ESTIMATOR:
+            try:
+                estimator_3d = create_pose_estimator_3d(config)
+                # 包装为兼容接口
+                return PoseEstimator3DWrapper(estimator_3d)
+            except Exception as e:
+                print(f"3D估计器创建失败: {e}")
+                print("回退到MediaPipe")
+                return MediaPipePoseEstimator(config)
+        else:
+            print("3D估计器模块不可用，使用MediaPipe")
+            return MediaPipePoseEstimator(config)
+
+    # 2D后端
     if backend == 'mediapipe':
         return MediaPipePoseEstimator(config)
     elif backend == 'mmpose':
         return MMPosePoseEstimator(config)
     else:
         raise ValueError(f"不支持的后端: {backend}")
+
+
+class PoseEstimator3DWrapper(BasePoseEstimator):
+    """
+    3D估计器的包装类
+
+    将3D估计器适配到原有的2D接口，同时提供3D数据访问
+    """
+
+    def __init__(self, estimator_3d):
+        self.estimator_3d = estimator_3d
+        self.backend = 'mmpose_3d'
+        self.num_keypoints = 17
+        self._last_result = None
+
+        # 关键点映射：COCO 17点 -> MediaPipe 33点风格的索引
+        # 用于兼容原有代码
+        self._coco_to_mp_indices = {
+            0: 0,    # nose
+            5: 11,   # left_shoulder
+            6: 12,   # right_shoulder
+            7: 13,   # left_elbow
+            8: 14,   # right_elbow
+            9: 15,   # left_wrist
+            10: 16,  # right_wrist
+            11: 23,  # left_hip
+            12: 24,  # right_hip
+            13: 25,  # left_knee
+            14: 26,  # right_knee
+            15: 27,  # left_ankle
+            16: 28,  # right_ankle
+        }
+
+    def process_frames(self, frames: List[np.ndarray]) -> List[Dict]:
+        """处理视频帧序列，返回兼容格式的关键点"""
+        # 调用3D估计器
+        result = self.estimator_3d.process_video(frames)
+        self._last_result = result
+
+        # 转换为兼容格式
+        keypoints_sequence = []
+        n_frames = len(frames)
+
+        for i in range(n_frames):
+            kp_2d = result['keypoints_2d'][i]
+            kp_3d = result['keypoints_3d'][i]
+            conf = result['confidences'][i]
+
+            # 构建兼容MediaPipe格式的输出
+            landmarks = []
+            h, w = frames[i].shape[:2]
+
+            for j in range(17):
+                # 获取对应的MediaPipe风格索引
+                mp_idx = self._coco_to_mp_indices.get(j, j)
+
+                landmarks.append({
+                    'id': mp_idx,
+                    'name': self.KEYPOINT_NAMES.get(mp_idx, f'point_{mp_idx}'),
+                    'x': int(kp_2d[j, 0]),
+                    'y': int(kp_2d[j, 1]),
+                    'z': float(kp_3d[j, 2]),
+                    'x_norm': kp_2d[j, 0] / w if w > 0 else 0,
+                    'y_norm': kp_2d[j, 1] / h if h > 0 else 0,
+                    'z_norm': float(kp_3d[j, 2]),
+                    'visibility': float(conf[j]),
+                    # 3D坐标（新增）
+                    'x_3d': float(kp_3d[j, 0]),
+                    'y_3d': float(kp_3d[j, 1]),
+                    'z_3d': float(kp_3d[j, 2]),
+                })
+
+            # 填充到33个点（兼容MediaPipe格式）
+            while len(landmarks) < 33:
+                landmarks.append({
+                    'id': len(landmarks),
+                    'name': f'point_{len(landmarks)}',
+                    'x': 0, 'y': 0, 'z': 0,
+                    'x_norm': 0, 'y_norm': 0, 'z_norm': 0,
+                    'visibility': 0,
+                    'x_3d': 0, 'y_3d': 0, 'z_3d': 0,
+                })
+
+            keypoints_sequence.append({
+                'landmarks': landmarks,
+                'visibility': [lm['visibility'] for lm in landmarks],
+                'detected': i in result['detected_frames'],
+                'frame_idx': i,
+                # 3D数据直接访问
+                'keypoints_3d': kp_3d,
+                'keypoints_2d': kp_2d,
+            })
+
+        return keypoints_sequence
+
+    def process_single_frame(self, frame: np.ndarray) -> Dict:
+        """处理单帧"""
+        result = self.process_frames([frame])
+        return result[0] if result else self._get_empty_keypoints(frame.shape)
+
+    def get_3d_keypoints(self) -> Optional[np.ndarray]:
+        """获取最后一次处理的3D关键点"""
+        if self._last_result is not None:
+            return self._last_result['keypoints_3d']
+        return None
+
+    def get_2d_keypoints(self) -> Optional[np.ndarray]:
+        """获取最后一次处理的2D关键点"""
+        if self._last_result is not None:
+            return self._last_result['keypoints_2d']
+        return None
+
+    def visualize_pose(self, frame: np.ndarray, keypoints: Dict) -> np.ndarray:
+        """可视化姿态"""
+        if hasattr(self.estimator_3d, 'visualize_pose'):
+            kp_2d = keypoints.get('keypoints_2d')
+            conf = keypoints.get('visibility', [])
+            if kp_2d is not None and len(conf) >= 17:
+                return self.estimator_3d.visualize_pose(
+                    frame, kp_2d[:17], np.array(conf[:17])
+                )
+
+        # 后备可视化
+        return self._fallback_visualize(frame, keypoints)
+
+    def _fallback_visualize(self, frame: np.ndarray, keypoints: Dict) -> np.ndarray:
+        """后备可视化方法"""
+        vis_frame = frame.copy()
+        if not keypoints.get('detected', False):
+            return vis_frame
+
+        for lm in keypoints['landmarks'][:17]:
+            if lm['visibility'] > 0.5:
+                cv2.circle(vis_frame, (lm['x'], lm['y']), 4, (0, 255, 0), -1)
+
+        return vis_frame
+
+    def _get_empty_keypoints(self, image_shape) -> Dict:
+        """返回空关键点"""
+        return {
+            'landmarks': [
+                {'id': i, 'name': f'point_{i}',
+                 'x': 0, 'y': 0, 'z': 0,
+                 'x_norm': 0, 'y_norm': 0, 'z_norm': 0,
+                 'visibility': 0,
+                 'x_3d': 0, 'y_3d': 0, 'z_3d': 0}
+                for i in range(33)
+            ],
+            'visibility': [0] * 33,
+            'detected': False,
+            'keypoints_3d': np.zeros((17, 3)),
+            'keypoints_2d': np.zeros((17, 2)),
+        }
+
+    def close(self):
+        """释放资源"""
+        if self.estimator_3d:
+            self.estimator_3d.close()
 
 
 # 兼容性别名

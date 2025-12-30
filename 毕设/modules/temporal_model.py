@@ -498,44 +498,70 @@ class TemporalModelAnalyzer:
         }
 
     def _prepare_input(self, keypoints_sequence: List[Dict]) -> Optional[torch.Tensor]:
-        """准备模型输入（优化版：增加数据多样性）"""
+        """
+        准备模型输入
+
+        支持2D和3D输入：
+        - 3D模式：17关键点 × 3坐标 = 51维
+        - 2D模式：33关键点 × 2坐标 = 66维
+        """
         valid_frames = [kp for kp in keypoints_sequence if kp.get('detected', False)]
 
         if len(valid_frames) < MODEL_CONFIG['sequence_length']:
             print(f"⚠️ 有效帧数 {len(valid_frames)} < 最小序列长度 {MODEL_CONFIG['sequence_length']}")
             return None
 
-        # 使用更多帧进行分析（如果可用）
+        # 检测是否为3D数据
+        is_3d = 'keypoints_3d' in valid_frames[0]
+
+        # 使用更多帧进行分析
         use_frames = min(len(valid_frames), MODEL_CONFIG['sequence_length'] * 2)
 
-        # 提取关键点坐标（归一化）+ 添加速度特征
         features = []
         prev_frame = None
+
         for i, kp in enumerate(valid_frames[:use_frames]):
             frame_features = []
-            for j, landmark in enumerate(kp['landmarks']):
-                frame_features.extend([landmark['x_norm'], landmark['y_norm']])
 
-                # 添加速度特征（如果有前一帧）
-                if prev_frame is not None:
-                    dx = landmark['x_norm'] - prev_frame['landmarks'][j]['x_norm']
-                    dy = landmark['y_norm'] - prev_frame['landmarks'][j]['y_norm']
-                    frame_features.extend([dx * 10, dy * 10])  # 放大速度特征
+            if is_3d and 'keypoints_3d' in kp:
+                # 3D模式：使用17个关键点的3D坐标
+                kp_3d = kp['keypoints_3d']
+                for j in range(min(17, len(kp_3d))):
+                    frame_features.extend([
+                        float(kp_3d[j, 0]),
+                        float(kp_3d[j, 1]),
+                        float(kp_3d[j, 2])
+                    ])
 
-            # 只在前30帧使用完整特征
+                # 填充到目标维度
+                target_dim = MODEL_CONFIG['input_dim']  # 17 * 3 = 51
+                while len(frame_features) < target_dim:
+                    frame_features.append(0.0)
+                frame_features = frame_features[:target_dim]
+
+            else:
+                # 2D模式：使用归一化坐标
+                for j, landmark in enumerate(kp['landmarks']):
+                    frame_features.extend([landmark['x_norm'], landmark['y_norm']])
+
+                # 使用2D维度
+                target_dim = MODEL_CONFIG.get('input_dim_2d', MODEL_CONFIG['input_dim'])
+                frame_features = frame_features[:target_dim]
+
             if i < MODEL_CONFIG['sequence_length']:
-                features.append(frame_features[:MODEL_CONFIG['input_dim']])
+                features.append(frame_features)
 
             prev_frame = kp
 
         # 确保有足够的帧
+        target_dim = len(features[0]) if features else MODEL_CONFIG['input_dim']
         while len(features) < MODEL_CONFIG['sequence_length']:
-            features.append(features[-1] if features else [0] * MODEL_CONFIG['input_dim'])
+            features.append(features[-1] if features else [0] * target_dim)
 
         # 转换为tensor
         input_tensor = torch.FloatTensor(features[:MODEL_CONFIG['sequence_length']]).unsqueeze(0).to(self.device)
 
-        # 数据归一化（使用更稳健的方法）
+        # 数据归一化
         mean = input_tensor.mean(dim=1, keepdim=True)
         std = input_tensor.std(dim=1, keepdim=True) + 1e-6
         input_tensor = (input_tensor - mean) / std

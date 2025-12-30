@@ -27,22 +27,130 @@ VIDEO_CONFIG = {
 
 # ================== 姿态估计配置 ==================
 
-# MediaPipe Pose配置
+# 姿态估计后端选择：'mediapipe' 或 'mmpose_3d'
 POSE_CONFIG = {
-    'backend': 'mediapipe',  # 'mediapipe' 或 'mmpose'
-    'model_complexity': 1,  # 0, 1, 2 (复杂度递增)
-    'min_detection_confidence': 0.5,
-    'min_tracking_confidence': 0.5,
-    'static_image_mode': False
+    'backend': 'mmpose_3d',  # 使用MMPose 3D后端
+
+    # MediaPipe配置（后备方案）
+    'mediapipe': {
+        'model_complexity': 1,
+        'min_detection_confidence': 0.5,
+        'min_tracking_confidence': 0.5,
+        'static_image_mode': False
+    }
 }
 
-# MMPose配置（预留）
-MMPOSE_CONFIG = {
-    'det_model': 'rtmdet',
-    'det_checkpoint': '',  # 检测模型权重路径
-    'pose_model': 'rtmpose',
-    'pose_checkpoint': '',  # 姿态模型权重路径
-    'device': 'cuda:0'  # 'cuda:0' 或 'cpu'
+# ================== MMPose 3D配置 ==================
+
+MMPOSE_3D_CONFIG = {
+    # 设备配置
+    'device': 'cuda:0',  # 'cuda:0' 或 'cpu'
+    'use_fp16': True,    # 使用FP16推理节省显存
+
+    # 2D检测器配置（RTMPose）
+    'detector_2d': {
+        'model': 'rtmpose-m',  # rtmpose-s/m/l
+        'config': 'rtmpose-m_8xb256-420e_coco-256x192.py',
+        'checkpoint': str(CHECKPOINT_DIR / 'rtmpose-m_simcc-coco_pt-aic-coco_420e-256x192.pth'),
+        'input_size': (256, 192),
+        'batch_size': 8,
+    },
+
+    # 3D提升器配置（MotionBERT）
+    'lifter_3d': {
+        'model': 'motionbert',
+        'config': 'motionbert_dstformer_243frm.yaml',
+        'checkpoint': str(CHECKPOINT_DIR / 'motionbert_lite_coco.pth'),
+        'receptive_frames': 243,  # 时间窗口大小
+        'sliding_window_overlap': 27,  # 滑动窗口重叠帧数
+    },
+
+    # 4GB显存优化策略
+    'optimization': {
+        'use_fp16': True,
+        'batch_size': 8,
+        'frame_sampling_rate': 1,  # 每N帧采样1次（1=全采样）
+        'max_frames_per_batch': 64,
+        'clear_cache_interval': 50,  # 每N帧清理显存
+    },
+
+    # 关键点定义（17点COCO格式）
+    'keypoints': {
+        'num_keypoints': 17,
+        'names': [
+            'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
+            'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
+            'left_wrist', 'right_wrist', 'left_hip', 'right_hip',
+            'left_knee', 'right_knee', 'left_ankle', 'right_ankle'
+        ],
+        # 跑步分析关键关节索引
+        'running_joints': {
+            'left_hip': 11, 'right_hip': 12,
+            'left_knee': 13, 'right_knee': 14,
+            'left_ankle': 15, 'right_ankle': 16,
+            'left_shoulder': 5, 'right_shoulder': 6,
+            'nose': 0
+        }
+    },
+
+    # 3D坐标系定义
+    'coordinate_system': {
+        'x': 'left-right',    # 正方向：右
+        'y': 'front-back',    # 正方向：前
+        'z': 'up-down',       # 正方向：上（垂直方向）
+        'unit': 'meters'      # 输出单位
+    }
+}
+
+# ================== 3D运动学分析配置 ==================
+
+KINEMATIC_3D_CONFIG = {
+    # 3D落地检测配置
+    'landing_detection': {
+        'method': '3d_z_velocity',  # 使用z坐标+速度检测
+        'z_threshold_percentile': 15,  # z坐标阈值百分位数
+        'velocity_threshold': 0.5,     # 速度阈值（m/s）
+        'min_landing_duration_ms': 50,
+        'max_landing_duration_ms': 350,
+    },
+
+    # 生物力学约束（不可修改！）
+    'biomechanical_constraints': {
+        'landing_knee_angle_min': 145.0,  # 落地膝角最小值
+        'landing_knee_angle_max': 175.0,  # 落地膝角最大值
+        'extension_rate_threshold': -1.0,  # 伸展趋势阈值
+    },
+
+    # 膝外翻/内扣检测配置
+    'knee_valgus': {
+        'enabled': True,
+        'normal_range': (-5, 5),      # 正常范围（度）
+        'mild_range': (5, 10),        # 轻度异常
+        'moderate_range': (10, 15),   # 中度异常
+        'severe_threshold': 15,       # 严重阈值
+    },
+
+    # 骨盆运动分析配置
+    'pelvic_motion': {
+        'enabled': True,
+        'vertical_excellent_max': 0.03,  # 垂直位移优秀阈值（躯干%）
+        'lateral_excellent_max': 0.02,   # 横向摆动优秀阈值
+    },
+
+    # 步态对称性配置
+    'symmetry': {
+        'enabled': True,
+        'excellent_threshold': 95,  # 对称性优秀阈值
+        'good_threshold': 90,
+        'fair_threshold': 80,
+    },
+
+    # 信号处理配置
+    'signal_processing': {
+        'smooth_window': 7,           # Savitzky-Golay窗口大小
+        'smooth_polyorder': 2,        # 多项式阶数
+        'interpolation_method': 'cubic',
+    }
 }
 
 # ================== 视角检测配置 ==================
@@ -120,7 +228,8 @@ KINEMATIC_CONFIG = {
 # ================== 深度学习模型配置 ==================
 
 MODEL_CONFIG = {
-    'input_dim': 33 * 2,  # MediaPipe 33个关键点 * 2D坐标
+    # 3D姿态输入配置（17关键点 × 3D坐标）
+    'input_dim': 17 * 3,  # COCO 17关键点 × 3D坐标
     'hidden_dim': 64,
     'num_layers': 2,
     'output_dim': 3,  # 触地/腾空/过渡
@@ -128,7 +237,16 @@ MODEL_CONFIG = {
     'sequence_length': 30,  # 时间序列长度
     'batch_size': 32,
     'learning_rate': 0.001,
-    'epochs': 50
+    'epochs': 50,
+
+    # 2D后备模式（使用MediaPipe时）
+    'input_dim_2d': 33 * 2,  # MediaPipe 33关键点 × 2D坐标
+
+    # 深度学习 + 规则融合权重（策略C）
+    'fusion_weights': {
+        'deep_learning': 0.4,  # 深度学习权重
+        'kinematic_rules': 0.6  # 规则权重
+    }
 }
 
 # ================== 技术质量评价配置 ==================

@@ -1,11 +1,16 @@
 # modules/quality_evaluator.py
 """
-重构版技术质量评价模块
+技术质量评价模块
+
+支持2D和3D分析结果的评价：
+- 2D模式：基于MediaPipe的分析结果
+- 3D模式：额外评估膝外翻、骨盆稳定性、步态对称性
+
 核心改进：
 1. 适配新的归一化振幅指标
 2. 支持分阶段膝关节角度评估
 3. 针对不同视角的评价策略
-4. 更专业的评分逻辑和解释性输出
+4. 3D特有指标评估（膝外翻、骨盆、对称性）
 """
 import numpy as np
 from typing import Dict, List, Optional
@@ -133,6 +138,9 @@ class QualityEvaluator:
         """侧面视角评估"""
         scores = {}
 
+        # 检查是否为3D分析结果
+        is_3d = kinematic.get('is_3d', False)
+
         # 1. 稳定性评估
         scores['stability'] = self._evaluate_stability(kinematic, temporal)
 
@@ -142,7 +150,65 @@ class QualityEvaluator:
         # 3. 跑姿评估（分阶段膝关节角度 + 前倾）
         scores['form'] = self._evaluate_form_improved(kinematic)
 
+        # 4. 3D特有指标评估
+        if is_3d:
+            scores['_3d_metrics'] = self._evaluate_3d_metrics(kinematic)
+
+            # 将3D指标融入总体评分
+            if 'knee_valgus' in scores['_3d_metrics']:
+                valgus_score = scores['_3d_metrics']['knee_valgus']
+                scores['form'] = scores['form'] * 0.8 + valgus_score * 0.2
+
+            if 'pelvic_stability' in scores['_3d_metrics']:
+                pelvic_score = scores['_3d_metrics']['pelvic_stability']
+                scores['stability'] = scores['stability'] * 0.7 + pelvic_score * 0.3
+
+            if 'symmetry' in scores['_3d_metrics']:
+                sym_score = scores['_3d_metrics']['symmetry']
+                scores['efficiency'] = scores['efficiency'] * 0.85 + sym_score * 0.15
+
         return scores
+
+    def _evaluate_3d_metrics(self, kinematic: Dict) -> Dict:
+        """评估3D特有指标"""
+        scores = {}
+
+        # 膝外翻/内扣评估
+        if 'knee_valgus' in kinematic:
+            valgus = kinematic['knee_valgus']
+            scores['knee_valgus'] = self._score_knee_valgus(valgus)
+
+        # 骨盆稳定性评估
+        if 'pelvic_motion' in kinematic:
+            pelvic = kinematic['pelvic_motion']
+            scores['pelvic_stability'] = pelvic.get('stability_score', 70)
+
+        # 步态对称性评估
+        if 'symmetry' in kinematic:
+            symmetry = kinematic['symmetry']
+            scores['symmetry'] = symmetry.get('overall_symmetry', 85)
+
+        return scores
+
+    def _score_knee_valgus(self, valgus_data: Dict) -> float:
+        """评估膝外翻/内扣"""
+        left = valgus_data.get('left', {})
+        right = valgus_data.get('right', {})
+
+        def severity_to_score(severity: str) -> float:
+            mapping = {
+                'normal': 100,
+                'mild': 75,
+                'moderate': 50,
+                'severe': 25,
+                'unknown': 70
+            }
+            return mapping.get(severity, 70)
+
+        left_score = severity_to_score(left.get('severity', 'unknown'))
+        right_score = severity_to_score(right.get('severity', 'unknown'))
+
+        return (left_score + right_score) / 2
 
     def _evaluate_frontal_view(self, kinematic: Dict, temporal: Dict) -> Dict:
         """正面/后方视角评估"""

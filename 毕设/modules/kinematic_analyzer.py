@@ -1,9 +1,14 @@
 # modules/kinematic_analyzer.py
 """
-重构版运动学特征解析模块
+运动学特征解析模块
+
+支持2D和3D分析模式：
+- 2D模式：使用MediaPipe的y坐标进行分析（后备方案）
+- 3D模式：使用MotionBERT的3D坐标进行分析（推荐）
+
 核心改进：
-1. 垂直振幅使用躯干长度归一化（解决单位不匹配问题）
-2. 膝关节角度分阶段分析（触地期、摆动期、蹬离期）
+1. 垂直振幅使用躯干长度归一化
+2. 膝关节角度分阶段分析
 3. 支持不同视角的分析策略
 4. 更精确的步态周期检测
 """
@@ -12,6 +17,28 @@ from scipy.signal import find_peaks, savgol_filter, butter, filtfilt
 from scipy.interpolate import interp1d
 from typing import List, Dict, Tuple, Optional
 from config.config import KINEMATIC_CONFIG
+
+# 导入3D分析器
+try:
+    from modules.kinematic_analyzer_3d import KinematicAnalyzer3D, KinematicAnalyzer3DWrapper
+    HAS_3D_ANALYZER = True
+except ImportError:
+    HAS_3D_ANALYZER = False
+
+
+def create_kinematic_analyzer(prefer_3d: bool = True):
+    """
+    创建运动学分析器的工厂函数
+
+    Args:
+        prefer_3d: 是否优先使用3D分析器
+
+    Returns:
+        运动学分析器实例
+    """
+    if prefer_3d and HAS_3D_ANALYZER:
+        return KinematicAnalyzer3DWrapper()
+    return KinematicAnalyzer()
 
 
 class KinematicAnalyzer:

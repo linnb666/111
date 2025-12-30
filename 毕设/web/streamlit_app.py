@@ -11,12 +11,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config.config import STREAMLIT_CONFIG, POSE_CONFIG, VIEW_DETECTION_CONFIG
 from modules.video_processor import VideoProcessor
 from modules.pose_estimator import create_pose_estimator
-from modules.kinematic_analyzer import KinematicAnalyzer
+from modules.kinematic_analyzer import KinematicAnalyzer, create_kinematic_analyzer
 from modules.temporal_model import TemporalModelAnalyzer
 from modules.quality_evaluator import QualityEvaluator
 from modules.ai_analyzer import AIAnalyzer
 from modules.database import DatabaseManager
 from modules.view_detector import ViewAngleDetector, AdaptiveAnalyzer
+
+# 尝试导入3D分析器
+try:
+    from modules.kinematic_analyzer_3d import KinematicAnalyzer3DWrapper
+    HAS_3D = True
+except ImportError:
+    HAS_3D = False
 
 # 页面配置
 st.set_page_config(
@@ -253,12 +260,20 @@ def analyze_video(video_path: str, selected_view: str = 'side'):
         # 提取关键帧（不在此处显示，在_display_saved_results中显示）
         keyframe_data = extract_keyframes_with_poses(frames, keypoints_sequence, fps, estimator, num_keyframes=6)
 
-        # 4. 运动学分析（使用自适应分析器）
+        # 4. 运动学分析（优先使用3D分析器）
         status_text.text("4️⃣ 运动学分析中...")
         progress_bar.progress(55)
 
-        adaptive_analyzer = AdaptiveAnalyzer()
-        kinematic_results = adaptive_analyzer.analyze(
+        # 检查是否有3D数据
+        has_3d_data = keypoints_sequence and 'keypoints_3d' in keypoints_sequence[0]
+
+        if has_3d_data and HAS_3D:
+            st.info("🔬 使用3D运动学分析")
+            kinematic_analyzer = KinematicAnalyzer3DWrapper()
+        else:
+            kinematic_analyzer = create_kinematic_analyzer(prefer_3d=HAS_3D)
+
+        kinematic_results = kinematic_analyzer.analyze_sequence(
             keypoints_sequence, fps,
             view_angle=detected_view
         )
@@ -702,6 +717,60 @@ def display_results(quality, kinematic, temporal, local_report, view_angle='side
             lat_cols[0].metric("髋部横摆", f"{lateral.get('hip_sway', 0):.2f}%")
             lat_cols[1].metric("肩部横摆", f"{lateral.get('shoulder_sway', 0):.2f}%")
             lat_cols[2].metric("稳定评分", f"{lateral.get('stability_score', 0):.1f}")
+
+    # 3D特有指标（如果可用）
+    is_3d = kinematic.get('is_3d', False)
+    if is_3d:
+        st.subheader("🔬 3D运动学分析")
+        st.success("使用3D姿态估计进行分析")
+
+        # 膝外翻/内扣分析
+        knee_valgus = kinematic.get('knee_valgus', {})
+        if knee_valgus:
+            st.markdown("#### 🦵 膝关节力线分析")
+            valgus_cols = st.columns(2)
+
+            left_valgus = knee_valgus.get('left', {})
+            right_valgus = knee_valgus.get('right', {})
+
+            with valgus_cols[0]:
+                st.markdown("**左腿**")
+                severity = left_valgus.get('severity', 'unknown')
+                direction = left_valgus.get('direction', 'neutral')
+                severity_cn = {'normal': '正常', 'mild': '轻度异常', 'moderate': '中度异常', 'severe': '严重', 'unknown': '未知'}
+                direction_cn = {'valgus': '外翻', 'varus': '内扣', 'neutral': '中立'}
+                st.metric("状态", f"{direction_cn.get(direction, direction)}", delta=severity_cn.get(severity, severity))
+                st.caption(f"平均偏移: {left_valgus.get('mean', 0):.1f}°")
+
+            with valgus_cols[1]:
+                st.markdown("**右腿**")
+                severity = right_valgus.get('severity', 'unknown')
+                direction = right_valgus.get('direction', 'neutral')
+                st.metric("状态", f"{direction_cn.get(direction, direction)}", delta=severity_cn.get(severity, severity))
+                st.caption(f"平均偏移: {right_valgus.get('mean', 0):.1f}°")
+
+        # 骨盆运动分析
+        pelvic = kinematic.get('pelvic_motion', {})
+        if pelvic:
+            st.markdown("#### 🦴 骨盆运动分析")
+            pelvic_cols = st.columns(4)
+            pelvic_cols[0].metric("垂直位移", f"{pelvic.get('vertical_displacement', 0):.1f}%")
+            pelvic_cols[1].metric("横向摆动", f"{pelvic.get('lateral_sway', 0):.1f}%")
+            pelvic_cols[2].metric("倾斜范围", f"{pelvic.get('tilt_range', 0):.1f}°")
+            pelvic_cols[3].metric("稳定性评分", f"{pelvic.get('stability_score', 0):.0f}")
+
+        # 步态对称性
+        symmetry = kinematic.get('symmetry', {})
+        if symmetry:
+            st.markdown("#### ⚖️ 步态对称性")
+            sym_cols = st.columns(3)
+            sym_cols[0].metric("触地时间对称", f"{symmetry.get('ground_contact_symmetry', 0):.1f}%")
+            sym_cols[1].metric("步长对称", f"{symmetry.get('step_length_symmetry', 0):.1f}%")
+            sym_cols[2].metric("总体对称性", f"{symmetry.get('overall_symmetry', 0):.1f}%")
+
+            dominant = symmetry.get('dominant_side', 'balanced')
+            dominant_cn = {'left': '左侧主导', 'right': '右侧主导', 'balanced': '均衡', 'unknown': '未知'}
+            st.caption(f"主导侧: {dominant_cn.get(dominant, dominant)}")
 
     # 深度学习结果
     st.subheader("🤖 深度学习分析")
