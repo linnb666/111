@@ -74,8 +74,8 @@ class MMPose3DEstimator(BasePoseEstimator3D):
     def __init__(self, config: Dict = None):
         """初始化MMPose 3D估计器"""
         self.config = config or MMPOSE_3D_CONFIG
-        self.device = self.config.get('device', 'cuda:0')
-        self.use_fp16 = self.config['optimization'].get('use_fp16', True)
+        self.device = self.config.get('device', 'cpu')  # 默认使用CPU
+        self.use_fp16 = self.config['optimization'].get('use_fp16', False)  # CPU默认不用FP16
 
         self.detector_2d = None
         self.lifter_3d = None
@@ -86,11 +86,16 @@ class MMPose3DEstimator(BasePoseEstimator3D):
     def _init_models(self):
         """初始化2D检测器和3D提升器"""
         try:
-            # 检查CUDA可用性
-            if 'cuda' in self.device and not torch.cuda.is_available():
-                print("CUDA不可用，切换到CPU模式")
-                self.device = 'cpu'
+            # 设备处理
+            if 'cuda' in self.device:
+                if not torch.cuda.is_available():
+                    print("CUDA不可用，切换到CPU模式")
+                    self.device = 'cpu'
+                    self.use_fp16 = False
+            else:
+                # CPU模式下禁用FP16
                 self.use_fp16 = False
+                print("使用CPU模式进行推理")
 
             # 初始化RTMPose 2D检测器
             self._init_rtmpose()
@@ -214,8 +219,8 @@ class MMPose3DEstimator(BasePoseEstimator3D):
                     all_keypoints_2d.append(np.zeros((17, 2)))
                     all_confidences.append(np.zeros(17))
 
-            # 显存清理
-            if start_idx > 0 and start_idx % opt.get('clear_cache_interval', 50) == 0:
+            # 显存清理（仅CUDA模式）
+            if 'cuda' in self.device and start_idx > 0 and start_idx % opt.get('clear_cache_interval', 50) == 0:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
@@ -358,7 +363,8 @@ class MMPose3DEstimator(BasePoseEstimator3D):
             del self.detector_2d
         if self.lifter_3d is not None:
             del self.lifter_3d
-        if torch.cuda.is_available():
+        # 仅在使用CUDA时清理显存
+        if 'cuda' in self.device and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
 
@@ -466,8 +472,8 @@ class MotionBERTLifter:
     使用预训练的MotionBERT模型进行2D→3D姿态提升
     """
 
-    def __init__(self, checkpoint_path: str, device: str = 'cuda:0',
-                 use_fp16: bool = True, receptive_frames: int = 243):
+    def __init__(self, checkpoint_path: str, device: str = 'cpu',
+                 use_fp16: bool = False, receptive_frames: int = 243):
         self.device = device
         self.use_fp16 = use_fp16
         self.receptive_frames = receptive_frames
@@ -498,10 +504,11 @@ class MotionBERTLifter:
             self.model.to(self.device)
             self.model.eval()
 
-            if self.use_fp16:
+            # 仅在CUDA设备上使用FP16
+            if self.use_fp16 and 'cuda' in self.device:
                 self.model.half()
 
-            print("MotionBERT模型加载成功")
+            print(f"MotionBERT模型加载成功 (设备: {self.device})")
 
         except ImportError:
             print("MotionBERT未安装，使用简化3D提升")
@@ -542,7 +549,8 @@ class MotionBERTLifter:
                 input_tensor = torch.from_numpy(window_2d).float()
                 input_tensor = input_tensor.unsqueeze(0).to(self.device)
 
-                if self.use_fp16:
+                # 仅在CUDA设备上使用FP16
+                if self.use_fp16 and 'cuda' in self.device:
                     input_tensor = input_tensor.half()
 
                 # 推理

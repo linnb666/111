@@ -44,8 +44,8 @@ POSE_CONFIG = {
 
 MMPOSE_3D_CONFIG = {
     # 设备配置
-    'device': 'cuda:0',  # 'cuda:0' 或 'cpu'
-    'use_fp16': True,    # 使用FP16推理节省显存
+    'device': 'cpu',     # 'cuda:0' 或 'cpu'
+    'use_fp16': False,   # CPU模式不使用FP16
 
     # 2D检测器配置（RTMPose）
     'detector_2d': {
@@ -65,13 +65,13 @@ MMPOSE_3D_CONFIG = {
         'sliding_window_overlap': 27,  # 滑动窗口重叠帧数
     },
 
-    # 4GB显存优化策略
+    # CPU模式优化策略
     'optimization': {
-        'use_fp16': True,
-        'batch_size': 8,
+        'use_fp16': False,  # CPU不使用FP16
+        'batch_size': 4,    # CPU模式减小batch以节省内存
         'frame_sampling_rate': 1,  # 每N帧采样1次（1=全采样）
-        'max_frames_per_batch': 64,
-        'clear_cache_interval': 50,  # 每N帧清理显存
+        'max_frames_per_batch': 32,
+        'clear_cache_interval': 100,
     },
 
     # 关键点定义（17点COCO格式）
