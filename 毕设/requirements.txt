@@ -1,31 +1,50 @@
 # 核心依赖
-opencv-python==4.8.0.76
-mediapipe==0.10.9
-numpy==1.24.3
-pandas==2.0.3
+opencv-python>=4.8.0
+numpy>=1.24.0
+pandas>=2.0.0
 
-# 深度学习
-torch==2.0.1
-torchvision==0.15.2
+# 深度学习框架
+torch>=2.0.0
+torchvision>=0.15.0
+
+# 姿态估计
+mediapipe>=0.10.0  # 2D后备方案
+
+# MMPose 3D姿态估计（推荐）
+# 安装命令：
+# pip install mmpose mmcv mmdet mmengine
+# 如果安装困难，系统会自动回退到MediaPipe
+# mmpose>=1.0.0
+# mmcv>=2.0.0
+# mmdet>=3.0.0
+# mmengine>=0.10.0
+
+# MotionBERT 3D姿态提升
+# 需要从GitHub克隆：https://github.com/Walter0807/MotionBERT
+# 权重下载后放入 data/checkpoints/
+einops>=0.6.0
 
 # 数据处理与分析
-scipy==1.11.1
+scipy>=1.11.0
 
 # 可视化
-matplotlib==3.7.2
+matplotlib>=3.7.0
 
 # Web框架
-flask==2.3.2
-flask-cors==4.0.0
-streamlit==1.25.0
+flask>=2.3.0
+flask-cors>=4.0.0
+streamlit>=1.25.0
 
 # 数据库
 # SQLite是Python内置的，无需额外安装
 
 # 工具库
-requests==2.31.0
-python-dotenv==1.0.0
+requests>=2.31.0
+python-dotenv>=1.0.0
 
-# 可选：AI API客户端
-# openai==0.27.8
-# anthropic==0.3.0
+# AI API客户端
+zhipuai>=2.0.0  # 智谱AI
+
+# 可选依赖
+# openai>=1.0.0
+# anthropic>=0.5.0
